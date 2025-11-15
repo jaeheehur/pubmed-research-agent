@@ -28,7 +28,7 @@ class PubMedResearchAgent:
 
     def __init__(
         self,
-        model_name: str = "moonshotai/Kimi-K2-Thinking",
+        model_name: Optional[str] = None,
         use_llm: bool = True,
         pubmed_email: Optional[str] = None
     ):
@@ -36,7 +36,7 @@ class PubMedResearchAgent:
         Initialize the research agent.
 
         Args:
-            model_name: HuggingFace model name for LLM
+            model_name: HuggingFace model name for LLM (if None and use_llm=True, uses rule-based extraction)
             use_llm: Whether to use LLM for entity extraction
             pubmed_email: Optional email for NCBI API (loaded from .env if not provided)
         """
@@ -49,20 +49,53 @@ class PubMedResearchAgent:
         self.use_llm = use_llm
         self.model = None
 
-        if use_llm:
+        if use_llm and model_name:
             try:
                 logger.info(f"Loading model: {model_name}")
-                self.model = pipeline(
-                    "text-generation",
-                    model=model_name,
-                    trust_remote_code=True,
-                    device_map="auto"  # Automatically use GPU if available
-                )
-                logger.info("Model loaded successfully")
+
+                # Check if CUDA is available for quantization
+                import torch
+                has_cuda = torch.cuda.is_available()
+
+                if has_cuda:
+                    # Use 8-bit quantization only on CUDA devices
+                    logger.info("CUDA detected, using 8-bit quantization")
+                    from transformers import BitsAndBytesConfig
+
+                    quantization_config = BitsAndBytesConfig(
+                        load_in_8bit=True,  # Use 8-bit quantization for speed
+                        llm_int8_threshold=6.0
+                    )
+
+                    self.model = pipeline(
+                        "text-generation",
+                        model=model_name,
+                        trust_remote_code=True,
+                        device_map="auto",
+                        model_kwargs={
+                            "quantization_config": quantization_config,
+                            "low_cpu_mem_usage": True
+                        }
+                    )
+                    logger.info("Model loaded successfully with 8-bit quantization")
+                else:
+                    # No CUDA, load without quantization (for CPU or MPS)
+                    logger.info("No CUDA detected, loading model without quantization")
+                    self.model = pipeline(
+                        "text-generation",
+                        model=model_name,
+                        trust_remote_code=True,
+                        device_map="auto",  # Will use MPS on Mac or CPU
+                        model_kwargs={"low_cpu_mem_usage": True}
+                    )
+                    logger.info("Model loaded successfully")
             except Exception as e:
                 logger.error(f"Failed to load model: {e}")
                 logger.warning("Falling back to rule-based extraction")
                 self.use_llm = False
+        elif use_llm and not model_name:
+            logger.warning("use_llm=True but no model_name provided, using rule-based extraction")
+            self.use_llm = False
 
         # Initialize entity extractor
         self.extractor = EntityExtractor(model_pipeline=self.model)

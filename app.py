@@ -11,10 +11,55 @@ import pandas as pd
 import plotly.express as px
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
+from pathlib import Path
 from agent import PubMedResearchAgent
+
+# GGUF 모델 지원 확인
+try:
+    from agent_gguf import PubMedResearchAgentGGUF
+    GGUF_AVAILABLE = True
+except:
+    GGUF_AVAILABLE = False
 
 # Load environment variables
 load_dotenv()
+
+# llama.cpp Metal 경고 숨김
+import warnings
+warnings.filterwarnings('ignore', category=RuntimeWarning)
+os.environ['GGML_METAL_LOG_LEVEL'] = '0'  # Metal 로그 최소화
+
+# GGUF 모델 스캔 함수
+def scan_installed_gguf_models():
+    """설치된 GGUF 모델 스캔"""
+    cache_dir = Path.home() / ".cache" / "huggingface" / "hub"
+
+    if not cache_dir.exists():
+        return []
+
+    gguf_models = []
+    for model_dir in cache_dir.glob("models--*"):
+        snapshots_dir = model_dir / "snapshots"
+        if not snapshots_dir.exists():
+            continue
+
+        for snapshot in snapshots_dir.iterdir():
+            if not snapshot.is_dir():
+                continue
+
+            for gguf_file in snapshot.glob("*.gguf"):
+                model_name = model_dir.name.replace("models--", "").replace("--", "/")
+                display_name = gguf_file.name
+
+                gguf_models.append({
+                    "display_name": display_name,
+                    "model_name": model_name,
+                    "filename": gguf_file.name,
+                    "path": str(gguf_file),
+                    "size_gb": gguf_file.stat().st_size / (1024**3),
+                })
+
+    return gguf_models
 
 
 def highlight_entities_in_text(text: str, entities: dict) -> str:
@@ -31,12 +76,12 @@ def highlight_entities_in_text(text: str, entities: dict) -> str:
     if not text or not entities:
         return text
 
-    # Define colors for different entity types
+    # Define colors for different entity types (darker shades)
     colors = {
-        'drug': '#E3F2FD',  # Light blue
-        'adverse_event': '#FFEBEE',  # Light red
-        'disease': '#FFF3E0',  # Light orange
-        'demographics': '#F3E5F5'  # Light purple
+        'drug': '#90CAF9',  # Darker blue
+        'adverse_event': '#EF9A9A',  # Darker red
+        'disease': '#FFCC80',  # Darker orange
+        'demographics': '#CE93D8'  # Darker purple
     }
 
     # Collect all entities with their types
@@ -58,6 +103,38 @@ def highlight_entities_in_text(text: str, entities: dict) -> str:
     for disease in entities.get('diseases', []):
         if disease:
             entity_map.append({'text': disease, 'type': 'disease', 'label': '🏥 Disease'})
+
+    # Add demographics (age, gender, ethnicity, sample size patterns)
+    demo = entities.get('demographics', {})
+    if demo:
+        # Age
+        age = demo.get('age', '')
+        if age and age != 'Unknown':
+            entity_map.append({'text': age, 'type': 'demographics', 'label': '👤 Demographics'})
+
+        # Gender keywords
+        gender = demo.get('gender', '')
+        if gender and gender != 'Unknown':
+            if gender.lower() in ['male', 'female', 'both']:
+                # Don't add generic keywords, they're too common
+                pass
+
+        # Sample size patterns
+        sample_size = demo.get('sample_size', 0)
+        if sample_size > 0:
+            # Try to find the exact phrase in text
+            size_patterns = [
+                rf'\b{sample_size}\s+patients\b',
+                rf'\b{sample_size}\s+participants\b',
+                rf'\b{sample_size}\s+subjects\b',
+                rf'\bn\s*=\s*{sample_size}\b'
+            ]
+            for pattern in size_patterns:
+                matches = list(re.finditer(pattern, text, re.IGNORECASE))
+                if matches:
+                    for match in matches:
+                        entity_map.append({'text': match.group(0), 'type': 'demographics', 'label': '👤 Demographics'})
+                    break
 
     # Sort by length (longest first) to avoid partial matches
     entity_map.sort(key=lambda x: len(x['text']), reverse=True)
@@ -157,50 +234,60 @@ with st.sidebar:
 
     # Model selection
     st.subheader("🤖 Entity Extraction Model")
+
+    # 기본 모델 옵션
     model_options = {
-        "Rule-based (Fast)": {"name": None, "use_llm": False},
-        "Kimi-K2-Thinking": {"name": "moonshotai/Kimi-K2-Thinking", "use_llm": True},
-        "JSL-MedLlama-3-8B-v2.0": {"name": "johnsnowlabs/JSL-MedLlama-3-8B-v2.0", "use_llm": True}
+        "Rule-based (Fast)": {"type": "rule", "name": None, "use_llm": False}
     }
+
+    # GGUF 모델 스캔 및 추가
+    if GGUF_AVAILABLE:
+        gguf_models = scan_installed_gguf_models()
+        if gguf_models:
+            for gguf in gguf_models:
+                model_options[gguf["display_name"]] = {
+                    "type": "gguf",
+                    "path": gguf["path"],
+                    "size": f"{gguf['size_gb']:.2f} GB"
+                }
+
+    # 기본값 확인
+    if st.session_state.selected_model not in model_options:
+        st.session_state.selected_model = "Rule-based (Fast)"
 
     selected_model = st.selectbox(
         "Select Model",
         options=list(model_options.keys()),
         index=list(model_options.keys()).index(st.session_state.selected_model),
-        help="Choose entity extraction method: Rule-based is fast, LLM models are more accurate but slower"
+        help="Rule-based: Fast keyword matching, GGUF: AI-powered extraction (fast & accurate)"
     )
 
-    # Reinitialize agent if model changed
-    if selected_model != st.session_state.selected_model:
+    # Reinitialize agent if model changed or not initialized
+    if selected_model != st.session_state.selected_model or st.session_state.agent is None:
         st.session_state.selected_model = selected_model
         pubmed_email = os.getenv("PUBMED_EMAIL")
         model_config = model_options[selected_model]
 
         with st.spinner(f"Loading {selected_model} model..."):
             try:
-                st.session_state.agent = PubMedResearchAgent(
-                    model_name=model_config["name"],
-                    use_llm=model_config["use_llm"],
-                    pubmed_email=pubmed_email
-                )
-                st.success(f"✅ {selected_model} loaded successfully!")
+                if model_config["type"] == "gguf":
+                    st.session_state.agent = PubMedResearchAgentGGUF(
+                        model_path=model_config["path"],
+                        use_llm=True,
+                        n_gpu_layers=1,
+                        pubmed_email=pubmed_email
+                    )
+                    st.success(f"✅ {selected_model} loaded! ({model_config['size']})")
+                else:
+                    # Rule-based
+                    st.session_state.agent = PubMedResearchAgent(
+                        use_llm=False,
+                        pubmed_email=pubmed_email
+                    )
+                    st.success("✅ Rule-based extraction ready!")
             except Exception as e:
                 st.error(f"Failed to load model: {str(e)}")
                 st.session_state.agent = None
-
-    # Initialize agent if not already done
-    if st.session_state.agent is None:
-        pubmed_email = os.getenv("PUBMED_EMAIL")
-        model_config = model_options[selected_model]
-        try:
-            st.session_state.agent = PubMedResearchAgent(
-                model_name=model_config["name"],
-                use_llm=model_config["use_llm"],
-                pubmed_email=pubmed_email
-            )
-        except Exception as e:
-            st.error(f"Failed to initialize agent: {str(e)}")
-            st.session_state.agent = None
 
     # Publication date filter
     st.subheader("📅 Publication Date")
@@ -224,10 +311,10 @@ with st.sidebar:
 
     max_results = st.slider(
         "Max Search Results",
-        min_value=10,
-        max_value=200,
-        value=50,
-        step=10,
+        min_value=1,
+        max_value=50,
+        value=10,
+        step=5,
         help="Maximum number of articles to fetch"
     )
 
@@ -238,65 +325,73 @@ with st.sidebar:
     st.markdown(
         '<div style="margin-top: 15px; padding: 10px; background-color: #f8f9fa; border-radius: 5px;">'
         '<div style="font-weight: bold; margin-bottom: 8px; font-size: 0.9em;">Entity Color Legend:</div>'
-        '<div style="font-size: 0.85em;">'
-        '<span style="background-color: #E3F2FD; padding: 2px 6px; border-radius: 3px; margin-right: 8px;">💊 Drug</span>'
-        '<span style="background-color: #FFEBEE; padding: 2px 6px; border-radius: 3px; margin-right: 8px;">⚠️ Adverse Event</span>'
-        '<span style="background-color: #FFF3E0; padding: 2px 6px; border-radius: 3px;">🏥 Disease</span>'
+        '<div style="font-size: 0.85em; line-height: 2.2;">'
+        '<span style="background-color: #90CAF9; padding: 2px 6px; border-radius: 3px;">💊 Drug</span><br>'
+        '<span style="background-color: #EF9A9A; padding: 2px 6px; border-radius: 3px;">⚠️ Adverse Event</span><br>'
+        '<span style="background-color: #FFCC80; padding: 2px 6px; border-radius: 3px;">🏥 Disease</span><br>'
+        '<span style="background-color: #CE93D8; padding: 2px 6px; border-radius: 3px;">👤 Demographics</span>'
         '</div>'
         '</div>',
         unsafe_allow_html=True
     )
 
 # Process search
-if search_button and query:
-    st.session_state.current_page = 1  # Reset to first page
-    with st.spinner(f"Searching PubMed for: '{query}'..."):
-        try:
-            # Convert dates to years for PubMed API
-            start_year = start_date.year
-            start_month = start_date.month
-            start_day = start_date.day
+if search_button:
+    if not query or not query.strip():
+        st.error("❌ Please enter a search query in the sidebar.")
+    elif st.session_state.agent is None:
+        st.error("❌ Agent not initialized. Please select a model in the sidebar.")
+    else:
+        st.session_state.current_page = 1  # Reset to first page
+        with st.spinner(f"Searching PubMed for: '{query}'..."):
+            try:
+                # Convert dates to years for PubMed API
+                start_year = start_date.year
+                start_month = start_date.month
+                start_day = start_date.day
 
-            end_year = end_date.year
-            end_month = end_date.month
-            end_day = end_date.day
+                end_year = end_date.year
+                end_month = end_date.month
+                end_day = end_date.day
 
-            results = st.session_state.agent.search_and_extract(
-                query=query,
-                max_results=max_results,
-                max_records=None,  # Get all results, we'll paginate in the UI
-                extract_entities=True,  # Always extract entities
-                start_year=start_year,
-                end_year=end_year
-            )
-
-            # Sort articles by publication date (newest first)
-            if results['articles']:
-                results['articles'].sort(
-                    key=lambda x: int(x.get('year', '0')) if x.get('year', '').isdigit() else 0,
-                    reverse=True
+                results = st.session_state.agent.search_and_extract(
+                    query=query,
+                    max_results=max_results,
+                    max_records=None,  # Get all results, we'll paginate in the UI
+                    extract_entities=True,  # Always extract entities
+                    start_year=start_year,
+                    end_year=end_year
                 )
 
-                # Update entities to match sorted articles (if entities exist)
-                if results.get('entities'):
-                    pmid_to_entity = {e['pmid']: e for e in results['entities']}
-                    results['entities'] = [
-                        pmid_to_entity[article['pmid']]
-                        for article in results['articles']
-                        if article.get('pmid') in pmid_to_entity
-                    ]
+                # Sort articles by publication date (newest first)
+                if results['articles']:
+                    results['articles'].sort(
+                        key=lambda x: int(x.get('year', '0')) if x.get('year', '').isdigit() else 0,
+                        reverse=True
+                    )
 
-            st.session_state.results = results
-            st.session_state.search_history.append({
-                'query': query,
-                'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                'num_articles': len(results['articles'])
-            })
+                    # Update entities to match sorted articles (if entities exist)
+                    if results.get('entities'):
+                        pmid_to_entity = {e['pmid']: e for e in results['entities']}
+                        results['entities'] = [
+                            pmid_to_entity[article['pmid']]
+                            for article in results['articles']
+                            if article.get('pmid') in pmid_to_entity
+                        ]
 
-            st.success(f"✅ Found {len(results['articles'])} articles!")
+                st.session_state.results = results
+                st.session_state.search_history.append({
+                    'query': query,
+                    'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    'num_articles': len(results['articles'])
+                })
 
-        except Exception as e:
-            st.error(f"❌ Error during search: {str(e)}")
+                st.success(f"✅ Found {len(results['articles'])} articles!")
+
+            except Exception as e:
+                st.error(f"❌ Error during search: {str(e)}")
+                import traceback
+                st.error(traceback.format_exc())
 
 # Display results
 if st.session_state.results:
@@ -407,50 +502,62 @@ if st.session_state.results:
                         # No entities, display plain text
                         st.text_area("Abstract", article['abstract'], height=150, key=f"abstract_{i}", label_visibility="collapsed")
 
-                # Detailed Extraction for this article
+                # Entity Counts table
                 if article_entities:
                     st.markdown("---")
-                    st.markdown("### 📋 Detailed Extraction")
-                    
-                    entities = article_entities
+                    st.markdown("### 📊 Entity Counts")
 
-                    # Demographics
-                    demo = entities.get('demographics', {})
-                    if demo and demo.get('sample_size', 0) > 0:
-                        st.markdown("**Demographics:**")
-                        d_col1, d_col2, d_col3, d_col4 = st.columns(4)
-                        with d_col1:
-                            st.metric("Sample Size", demo.get('sample_size', 0))
-                        with d_col2:
-                            st.metric("Age", demo.get('age', 'Unknown'))
-                        with d_col3:
-                            st.metric("Gender", demo.get('gender', 'Unknown'))
-                        with d_col4:
-                            ethnicity = demo.get('ethnicity', 'Unknown')
-                            if ethnicity != 'Unknown':
-                                st.metric("Ethnicity", ethnicity)
+                    # Collect all entities with their types
+                    entity_rows = []
+                    row_num = 1
 
-                    # Drugs
-                    drugs = entities.get('drugs', [])
-                    if drugs:
-                        st.markdown(f"**Drugs ({len(drugs)}):**")
-                        for drug in drugs:
-                            st.markdown(f"- {drug.get('name', 'Unknown')}: {drug.get('context', '')}")
+                    # Count occurrences of each keyword in the abstract
+                    abstract_lower = article.get('abstract', '').lower()
 
-                    # Adverse Events
-                    aes = entities.get('adverse_events', [])
-                    if aes:
-                        st.markdown(f"**Adverse Events ({len(aes)}):**")
-                        for ae in aes:
-                            severity = ae.get('severity', 'unknown')
-                            st.markdown(f"- {ae.get('event', 'Unknown')} [{severity}]: {ae.get('context', '')}")
-                    
-                    # Diseases
-                    diseases = entities.get('diseases', [])
-                    if diseases:
-                        st.markdown(f"**Diseases ({len(diseases)}):**")
-                        for d in diseases:
-                            st.markdown(f"- {d}")
+                    # Add drugs
+                    for drug in article_entities.get('drugs', []):
+                        keyword = drug.get('name', 'Unknown')
+                        # Count occurrences (case-insensitive)
+                        count = abstract_lower.count(keyword.lower()) if keyword != 'Unknown' else 1
+                        entity_rows.append({
+                            "No.": row_num,
+                            "Keyword": keyword,
+                            "Entity Type": "Drug",
+                            "Count": count
+                        })
+                        row_num += 1
+
+                    # Add adverse events
+                    for ae in article_entities.get('adverse_events', []):
+                        keyword = ae.get('event', 'Unknown')
+                        # Count occurrences (case-insensitive)
+                        count = abstract_lower.count(keyword.lower()) if keyword != 'Unknown' else 1
+                        entity_rows.append({
+                            "No.": row_num,
+                            "Keyword": keyword,
+                            "Entity Type": "Adverse Event",
+                            "Count": count
+                        })
+                        row_num += 1
+
+                    # Add diseases
+                    for disease in article_entities.get('diseases', []):
+                        # Count occurrences (case-insensitive)
+                        count = abstract_lower.count(disease.lower()) if disease else 1
+                        entity_rows.append({
+                            "No.": row_num,
+                            "Keyword": disease,
+                            "Entity Type": "Disease",
+                            "Count": count
+                        })
+                        row_num += 1
+
+                    if entity_rows:
+                        # Create DataFrame and display as table
+                        entity_df = pd.DataFrame(entity_rows)
+                        st.dataframe(entity_df, use_container_width=True, hide_index=True)
+                    else:
+                        st.info("No entities extracted from this article.")
 
 
         # Pagination controls at bottom

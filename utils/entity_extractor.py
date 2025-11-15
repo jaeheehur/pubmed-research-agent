@@ -5,10 +5,17 @@ Extracts drugs, adverse events, and patient demographics from medical abstracts
 
 import logging
 import json
+import os
 from typing import Dict, List, Any, Optional
 from dataclasses import dataclass, asdict
+from pathlib import Path
 
-logging.basicConfig(level=logging.INFO)
+# Set logging level from environment variable, default to INFO
+log_level = os.getenv('LOG_LEVEL', 'INFO').upper()
+logging.basicConfig(
+    level=getattr(logging, log_level),
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
 
@@ -43,49 +50,40 @@ class EntityExtractor:
         self.model = model_pipeline
         self.extraction_prompt = self._build_extraction_prompt()
 
+        # Detect model type for special handling
+        self.model_name = None
+        if model_pipeline is not None:
+            try:
+                self.model_name = model_pipeline.model.config._name_or_path
+                logger.info(f"Detected model: {self.model_name}")
+            except:
+                logger.debug("Could not detect model name")
+
     def _build_extraction_prompt(self) -> str:
         """Build system prompt for entity extraction"""
-        return """You are a medical information extraction expert. Your task is to extract specific entities from medical research abstracts.
-
-Extract the following information in JSON format:
-
-1. **Drugs/Medications**:
-   - Name of drug or medication
-   - Context: The full sentence where the drug is mentioned.
-
-2. **Adverse Events** (including diseases):
-   - Event/condition name
-   - Severity (if mentioned): mild, moderate, severe, or unknown
-   - Context: The full sentence where the event is mentioned.
-
-3. **Patient Demographics**:
-   - Age: Age range or mean age mentioned
-   - Gender: Male, Female, Both, or Unknown
-   - Ethnicity: If mentioned
-   - Sample size: Number of patients/participants
-
-4. **Diseases/Conditions**:
-   - List all diseases or medical conditions mentioned
-
-Return the result in this exact JSON structure:
+        # Load extraction prompt from file
+        prompt_file = Path(__file__).parent.parent / "entity_extraction.prompt"
+        try:
+            prompt = prompt_file.read_text(encoding='utf-8').strip()
+            logger.debug(f"Loaded extraction prompt from {prompt_file}")
+            return prompt
+        except Exception as e:
+            logger.error(f"Failed to load prompt file: {e}")
+            # Fallback to default prompt
+            return """Extract medical entities from the abstract in JSON format:
 {
-  "drugs": [
-    {"name": "drug name", "context": "how it's used/mentioned"}
-  ],
-  "adverse_events": [
-    {"event": "event name", "severity": "mild/moderate/severe/unknown", "context": "description"}
-  ],
-  "demographics": {
-    "age": "age range or mean",
-    "gender": "Male/Female/Both/Unknown",
-    "ethnicity": "ethnicity if mentioned",
-    "sample_size": number_of_participants
-  },
-  "diseases": ["disease1", "disease2"]
+  "drugs": [{"name": "drug name", "context": "how it is used"}],
+  "adverse_events": [{"event": "adverse event name", "severity": "mild/moderate/severe/unknown", "context": "details about the event"}],
+  "demographics": {"age": "age range or mean age (e.g., 65±10, 18-65)", "gender": "Male/Female/Both/Unknown", "ethnicity": "ethnicity or race if mentioned", "sample_size": 0},
+  "diseases": ["disease1", "disease2", "disease3", "disease4", "..."]
 }
 
-If information is not available, use empty lists [] or "Unknown" for strings, and 0 for sample_size.
-"""
+Instructions:
+- Extract ALL drugs mentioned in the text
+- Extract ALL adverse events/side effects mentioned
+- For demographics: carefully look for age (mean age, age range, median age), gender distribution, ethnicity/race, and sample size (n=X, X patients, X participants, X subjects)
+- Extract ALL diseases/conditions mentioned (not limited to 2-3, can be many)
+- Return ONLY the JSON object, no explanations or other text"""
 
     def extract(self, text: str, use_model: bool = True) -> ExtractedEntities:
         """
@@ -113,65 +111,138 @@ If information is not available, use empty lists [] or "Unknown" for strings, an
         try:
             logger.info("Extracting entities with LLM...")
 
-            messages = [
-                {"role": "system", "content": self.extraction_prompt},
-                {"role": "user", "content": f"Extract medical entities from this abstract:\n\n{text}"}
-            ]
+            # Format prompt based on model type
+            # JSL-MedLlama models may need special formatting
+            if self.model_name and 'JSL-MedLlama' in self.model_name:
+                logger.info("Using JSL-MedLlama specific prompt format")
+                # Concise format for JSL-MedLlama
+                full_prompt = f"""### Instruction:
+{self.extraction_prompt}
+
+### Input:
+{text}
+
+### Response:
+"""
+            else:
+                # Standard format for other models
+                full_prompt = f"""{self.extraction_prompt}
+
+Abstract:
+{text}"""
 
             # Generate response using the model
-            response = self.model(messages, max_new_tokens=1024, temperature=0.1)
+            logger.debug(f"Calling model with prompt length: {len(full_prompt)}")
 
-            # Extract generated text
+            # Call the pipeline with proper parameters for text-generation
+            # Note: return_full_text=True because some models don't work well with False
+            # Reduced max_new_tokens for faster generation (JSON is usually < 512 tokens)
+            response = self.model(
+                full_prompt,
+                max_new_tokens=512,  # Reduced from 1024 for speed
+                temperature=0.1,
+                do_sample=True,
+                return_full_text=True,  # Include the prompt, we'll strip it later
+                pad_token_id=self.model.tokenizer.eos_token_id,  # Avoid warnings
+                repetition_penalty=1.1  # Prevent repetitive output
+            )
+
+            logger.debug(f"Model response type: {type(response)}")
+
+            # Extract generated text from response
             if isinstance(response, list) and len(response) > 0:
-                generated_text = response[0].get('generated_text', '')
+                # response is a list of dicts with 'generated_text' key
+                full_text = response[0].get('generated_text', '')
+                logger.debug(f"Full text length: {len(full_text)} chars")
 
-                # Find the assistant's response
-                if isinstance(generated_text, list):
-                    for msg in generated_text:
-                        if msg.get('role') == 'assistant':
-                            assistant_response = msg.get('content', '')
-                            break
-                    else:
-                        assistant_response = str(generated_text)
+                # Check if full_text is empty
+                if not full_text or len(full_text.strip()) == 0:
+                    logger.error("Model returned empty generated_text!")
+                    logger.error(f"Raw response[0]: {response[0]}")
+                    return self._extract_rule_based(text)
+
+                # Remove the prompt from the response (since return_full_text=True)
+                # The generated part comes after the prompt
+                if full_text.startswith(full_prompt):
+                    generated_text = full_text[len(full_prompt):].strip()
+                    logger.debug("Stripped prompt from response")
                 else:
-                    assistant_response = generated_text
+                    # If prompt is not at the start, use the full text
+                    generated_text = full_text
+                    logger.debug("Could not find prompt in response, using full text")
+
+                logger.info(f"Generated text length: {len(generated_text)} chars")
+
+                # Check if generated_text is empty after stripping prompt
+                if not generated_text or len(generated_text.strip()) == 0:
+                    logger.error("Generated text is empty after stripping prompt!")
+                    logger.error(f"Full text (first 500 chars): {full_text[:500]}")
+                    return self._extract_rule_based(text)
+
+                logger.info(f"Generated text preview:\n{generated_text[:500]}\n{'...' if len(generated_text) > 500 else ''}")
 
                 # Parse JSON from response
-                entities_dict = self._parse_llm_response(assistant_response)
-                return self._dict_to_entities(entities_dict)
+                entities_dict = self._parse_llm_response(generated_text)
+
+                # Check if parsing was successful
+                if entities_dict and (entities_dict.get('drugs') or entities_dict.get('adverse_events') or entities_dict.get('diseases')):
+                    logger.info(f"Successfully extracted entities with LLM: {len(entities_dict.get('drugs', []))} drugs, {len(entities_dict.get('adverse_events', []))} AEs")
+                    return self._dict_to_entities(entities_dict)
+                else:
+                    logger.warning("LLM returned empty entities, falling back to rule-based")
+                    return self._extract_rule_based(text)
             else:
-                logger.error("Unexpected model response format")
+                logger.error(f"Unexpected model response format: {type(response)}")
+                logger.debug(f"Response: {response}")
                 return self._extract_rule_based(text)
 
         except Exception as e:
-            logger.error(f"Error during LLM extraction: {e}")
+            logger.error(f"Error during LLM extraction: {e}", exc_info=True)
             logger.info("Falling back to rule-based extraction")
             return self._extract_rule_based(text)
 
     def _parse_llm_response(self, response: str) -> Dict[str, Any]:
         """Parse JSON from LLM response"""
         try:
+            # Check if response is empty
+            if not response or len(response.strip()) == 0:
+                logger.error("Empty response received for JSON parsing")
+                return self._empty_entities_dict()
+
             # Try to find JSON in the response
             # Look for content between ```json and ``` or { and }
             if '```json' in response:
+                logger.debug("Found JSON code block with ```json")
                 start = response.find('```json') + 7
                 end = response.find('```', start)
                 json_str = response[start:end].strip()
             elif '```' in response:
+                logger.debug("Found code block with ```")
                 start = response.find('```') + 3
                 end = response.find('```', start)
                 json_str = response[start:end].strip()
             elif '{' in response:
+                logger.debug("Found JSON object with {")
                 start = response.find('{')
                 end = response.rfind('}') + 1
                 json_str = response[start:end]
             else:
+                logger.warning("No JSON markers found in response, using full response")
+                logger.debug(f"Full response: {response}")
                 json_str = response
 
-            return json.loads(json_str)
+            if not json_str or len(json_str.strip()) == 0:
+                logger.error("Extracted JSON string is empty")
+                logger.error(f"Original response: {response[:500]}")
+                return self._empty_entities_dict()
+
+            logger.debug(f"Attempting to parse JSON (length: {len(json_str)} chars, first 300 chars): {json_str[:300]}")
+            parsed = json.loads(json_str)
+            logger.info(f"Successfully parsed JSON with {len(parsed.get('drugs', []))} drugs, {len(parsed.get('adverse_events', []))} adverse events")
+            return parsed
         except json.JSONDecodeError as e:
             logger.error(f"Failed to parse JSON from LLM response: {e}")
-            logger.debug(f"Response was: {response}")
+            logger.error(f"Full response (first 1000 chars): {response[:1000]}")
             return self._empty_entities_dict()
 
     def _extract_rule_based(self, text: str) -> ExtractedEntities:
