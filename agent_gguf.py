@@ -52,7 +52,7 @@ class GGUFEntityExtractor:
             self.available = False
 
         # Load extraction prompt from file
-        prompt_file = Path(__file__).parent / "entity_extraction.prompt"
+        prompt_file = Path(__file__).parent / "config" / "entity_extraction.prompt"
         try:
             self.extraction_prompt = prompt_file.read_text(encoding='utf-8').strip()
             logger.debug(f"Loaded extraction prompt from {prompt_file}")
@@ -63,14 +63,27 @@ class GGUFEntityExtractor:
 {
   "drugs": [{"name": "drug name", "context": "how it is used"}],
   "adverse_events": [{"event": "adverse event name", "severity": "mild/moderate/severe/unknown", "context": "details about the event"}],
-  "demographics": {"age": "age range or mean age (e.g., 65±10, 18-65)", "gender": "Male/Female/Both/Unknown", "ethnicity": "ethnicity or race if mentioned", "sample_size": 0},
+  "demographics": {
+    "age": "age range or mean age (e.g., 65±10, 18-65)",
+    "gender": "Male/Female/Both/Unknown",
+    "race": "race or ethnicity if mentioned",
+    "pregnancy": "pregnancy status if mentioned (e.g., pregnant, not pregnant, trimester, Unknown)",
+    "bmi": "BMI or body mass index if mentioned (e.g., 25.3, overweight, Unknown)",
+    "sample_size": 0
+  },
   "diseases": ["disease1", "disease2", "disease3", "disease4", "..."]
 }
 
 Instructions:
 - Extract ALL drugs mentioned in the text
 - Extract ALL adverse events/side effects mentioned
-- For demographics: carefully look for age (mean age, age range, median age), gender distribution, ethnicity/race, and sample size (n=X, X patients, X participants, X subjects)
+- For demographics, carefully look for:
+  - age: mean age, age range, median age (e.g., 65±10 years, 18-65 years)
+  - gender: Male, Female, Both, or Unknown
+  - race: ethnicity or race if mentioned (e.g., Caucasian, African American, Asian, Hispanic)
+  - pregnancy: pregnancy status if mentioned (e.g., "pregnant women", "first trimester", "not pregnant")
+  - bmi: body mass index or weight status (e.g., "BMI 28.5", "obese", "overweight")
+  - sample_size: n=X, X patients, X participants, X subjects
 - Extract ALL diseases/conditions mentioned (not limited to 2-3, can be many)
 - Return ONLY the JSON object, no explanations or other text"""
 
@@ -83,26 +96,41 @@ Instructions:
         try:
             logger.info("Extracting entities with GGUF model...")
 
-            # Format prompt
-            full_prompt = f"""{self.extraction_prompt}
+            # Construct user message
+            user_message = f"""{self.extraction_prompt}
 
 Abstract:
 {text.strip()}
 
 JSON:"""
 
+            # Use Llama 3 chat template format (without <|begin_of_text|> - llama.cpp adds it automatically)
+            full_prompt = f"""<|start_header_id|>system<|end_header_id|>
+
+You are a medical entity extraction assistant. Your task is to extract ALL medical entities from abstracts and return them in valid JSON format. Be thorough and extract:
+- ALL drug names mentioned (including vaccines, medications, and treatments)
+- ALL adverse events or side effects
+- ALL demographics information (age, gender, race/ethnicity, pregnancy status, BMI, sample size)
+- ALL diseases and medical conditions mentioned<|eot_id|><|start_header_id|>user<|end_header_id|>
+
+{user_message}<|eot_id|><|start_header_id|>assistant<|end_header_id|>
+
+"""
+
             # Generate response
             logger.debug(f"Calling GGUF model with prompt length: {len(full_prompt)}")
 
             response = self.llm(
                 full_prompt,
-                max_tokens=512,
+                max_tokens=1024,  # Increased for complete JSON response
                 temperature=0.1,
-                echo=False
+                echo=False,  # Don't echo prompt since we're using chat template
+                stop=["<|eot_id|>"]  # Stop at end of turn token
             )
 
-            raw_text = response['choices'][0]['text']
-            generated_text = raw_text.strip()
+            generated_text = response['choices'][0]['text'].strip()
+            logger.debug(f"Raw response length: {len(generated_text)} chars")
+
             logger.info(f"Generated {len(generated_text)} chars")
             logger.debug(f"Generated text preview: {generated_text[:200]}")
 
@@ -143,15 +171,39 @@ JSON:"""
 
     def _dict_to_entities(self, data: Dict[str, Any]) -> ExtractedEntities:
         """Convert dictionary to ExtractedEntities"""
+        # Handle both old (ethnicity) and new (race) field names for backwards compatibility
+        demographics_data = data.get('demographics', {})
+        if 'ethnicity' in demographics_data and 'race' not in demographics_data:
+            demographics_data['race'] = demographics_data.pop('ethnicity')
+
+        # Normalize sample_size to integer
+        if demographics_data and 'sample_size' in demographics_data:
+            sample_size = demographics_data['sample_size']
+            if isinstance(sample_size, str):
+                # Try to extract number from string like "n=102", "n = 102", or "102"
+                import re
+                number_match = re.search(r'\d+', sample_size)
+                if number_match:
+                    try:
+                        demographics_data['sample_size'] = int(number_match.group(0))
+                    except ValueError:
+                        demographics_data['sample_size'] = 0
+                else:
+                    demographics_data['sample_size'] = 0
+            elif not isinstance(sample_size, int):
+                demographics_data['sample_size'] = 0
+
         return ExtractedEntities(
             drugs=data.get('drugs', []),
             adverse_events=data.get('adverse_events', []),
-            demographics=data.get('demographics', {
+            demographics=demographics_data if demographics_data else {
                 "age": "Unknown",
                 "gender": "Unknown",
-                "ethnicity": "Unknown",
+                "race": "Unknown",
+                "pregnancy": "Unknown",
+                "bmi": "Unknown",
                 "sample_size": 0
-            }),
+            },
             diseases=data.get('diseases', [])
         )
 
@@ -163,7 +215,9 @@ JSON:"""
             'demographics': {
                 "age": "Unknown",
                 "gender": "Unknown",
-                "ethnicity": "Unknown",
+                "race": "Unknown",
+                "pregnancy": "Unknown",
+                "bmi": "Unknown",
                 "sample_size": 0
             },
             'diseases': []
@@ -221,9 +275,26 @@ class PubMedResearchAgentGGUF:
         max_records: int = 10,
         extract_entities: bool = True,
         start_year: Optional[int] = None,
-        end_year: Optional[int] = None
+        end_year: Optional[int] = None,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None
     ) -> Dict[str, Any]:
-        """Search PubMed and extract entities"""
+        """
+        Search PubMed and extract entities.
+
+        Args:
+            query: Search query
+            max_results: Maximum results to fetch
+            max_records: Maximum records to return
+            extract_entities: Whether to extract entities
+            start_year: Start year (deprecated - use start_date)
+            end_year: End year (deprecated - use end_date)
+            start_date: Start date in YYYY/MM/DD format
+            end_date: End date in YYYY/MM/DD format
+
+        Returns:
+            Dictionary with search results and extracted entities
+        """
         logger.info(f"Starting research query: {query}")
 
         # Search PubMed
@@ -233,7 +304,9 @@ class PubMedResearchAgentGGUF:
             max_records=max_records,
             rerank="referenced_by",
             start_year=start_year,
-            end_year=end_year
+            end_year=end_year,
+            start_date=start_date,
+            end_date=end_date
         )
 
         logger.info(f"Found {len(articles)} articles")
@@ -264,6 +337,148 @@ class PubMedResearchAgentGGUF:
                 })
 
         return result
+
+    def generate_report(self, research_data: Dict[str, Any]) -> str:
+        """
+        Generate a human-readable research report.
+
+        Args:
+            research_data: Output from search_and_extract()
+
+        Returns:
+            Formatted text report
+        """
+        lines = []
+        lines.append("=" * 100)
+        lines.append("PUBMED RESEARCH REPORT")
+        lines.append("=" * 100)
+        lines.append(f"\nQuery: {research_data['query']}")
+        lines.append(f"Total Articles Analyzed: {research_data['total_articles']}\n")
+
+        # Summary of articles
+        lines.append("\n" + "=" * 100)
+        lines.append("ARTICLES SUMMARY")
+        lines.append("=" * 100)
+
+        for i, article in enumerate(research_data['articles'], 1):
+            lines.append(f"\n[{i}] {article.get('title', 'No title')}")
+            lines.append(f"    PMID: {article.get('pmid', 'N/A')} | "
+                        f"Journal: {article.get('journal', 'Unknown')} | "
+                        f"Year: {article.get('year', 'N/A')}")
+
+            if article.get('doi'):
+                lines.append(f"    DOI: {article['doi']}")
+
+            if 'referenced_by_count' in article:
+                lines.append(f"    Citations in dataset: {article['referenced_by_count']}")
+
+        # Entity extraction summary
+        if research_data.get('entities'):
+            lines.append("\n\n" + "=" * 100)
+            lines.append("ENTITY EXTRACTION SUMMARY")
+            lines.append("=" * 100)
+
+            # Aggregate all entities
+            all_drugs = set()
+            all_adverse_events = set()
+            all_diseases = set()
+
+            for entity_data in research_data['entities']:
+                entities = entity_data['entities']
+
+                # Collect drugs
+                for drug in entities.get('drugs', []):
+                    all_drugs.add(drug.get('name', ''))
+
+                # Collect adverse events
+                for ae in entities.get('adverse_events', []):
+                    all_adverse_events.add(ae.get('event', ''))
+
+                # Collect diseases
+                for disease in entities.get('diseases', []):
+                    if disease:
+                        all_diseases.add(disease)
+
+            lines.append(f"\nUnique Drugs Mentioned: {len(all_drugs)}")
+            if all_drugs:
+                for drug in sorted(all_drugs):
+                    if drug:
+                        lines.append(f"  - {drug}")
+
+            lines.append(f"\nUnique Adverse Events: {len(all_adverse_events)}")
+            if all_adverse_events:
+                for ae in sorted(all_adverse_events):
+                    if ae:
+                        lines.append(f"  - {ae}")
+
+            lines.append(f"\nDiseases/Conditions: {len(all_diseases)}")
+            if all_diseases:
+                for disease in sorted(all_diseases):
+                    lines.append(f"  - {disease}")
+
+            # Detailed per-article extraction
+            lines.append("\n\n" + "=" * 100)
+            lines.append("DETAILED ENTITY EXTRACTION BY ARTICLE")
+            lines.append("=" * 100)
+
+            for i, entity_data in enumerate(research_data['entities'], 1):
+                lines.append(f"\n[{i}] {entity_data['title']}")
+                lines.append(f"PMID: {entity_data['pmid']}")
+
+                entities = entity_data['entities']
+
+                # Demographics
+                demo = entities.get('demographics', {})
+                if demo:
+                    lines.append(f"\nDemographics:")
+                    lines.append(f"  Sample Size: {demo.get('sample_size', 0)}")
+                    lines.append(f"  Age: {demo.get('age', 'Unknown')}")
+                    lines.append(f"  Gender: {demo.get('gender', 'Unknown')}")
+                    if demo.get('ethnicity') and demo['ethnicity'] != 'Unknown':
+                        lines.append(f"  Ethnicity: {demo['ethnicity']}")
+
+                # Drugs
+                drugs = entities.get('drugs', [])
+                if drugs:
+                    lines.append(f"\nDrugs ({len(drugs)}):")
+                    for drug in drugs:
+                        lines.append(f"  - {drug.get('name', 'Unknown')}: {drug.get('context', '')}")
+
+                # Adverse Events
+                aes = entities.get('adverse_events', [])
+                if aes:
+                    lines.append(f"\nAdverse Events ({len(aes)}):")
+                    for ae in aes:
+                        severity = ae.get('severity', 'unknown')
+                        lines.append(f"  - {ae.get('event', 'Unknown')} "
+                                   f"[{severity}]: {ae.get('context', '')}")
+
+                lines.append("\n" + "-" * 100)
+
+        lines.append("\n" + "=" * 100)
+        lines.append("END OF REPORT")
+        lines.append("=" * 100)
+
+        return "\n".join(lines)
+
+    def save_report(self, research_data: Dict[str, Any], filepath: str):
+        """Save report to file"""
+        report = self.generate_report(research_data)
+
+        with open(filepath, 'w', encoding='utf-8') as f:
+            f.write(report)
+
+        logger.info(f"Report saved to {filepath}")
+
+    def save_json(self, research_data: Dict[str, Any], filepath: str):
+        """Save research data as JSON"""
+        # Convert ExtractedEntities to dict if needed
+        data_copy = research_data.copy()
+
+        with open(filepath, 'w', encoding='utf-8') as f:
+            json.dump(data_copy, f, indent=2, ensure_ascii=False)
+
+        logger.info(f"JSON data saved to {filepath}")
 
 
 # Example usage

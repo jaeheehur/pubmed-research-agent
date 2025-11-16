@@ -1,8 +1,6 @@
-# Core dependencies
-transformers>=4.36.0
-torch>=2.1.0
-accelerate>=0.25.0
-bitsandbytes>=0.41.0
+# Core dependencies - GGUF model support
+llama-cpp-python>=0.2.0
+huggingface-hub>=0.20.0
 
 # PubMed API and data handling
 biopython>=1.81

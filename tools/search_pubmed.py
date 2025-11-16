@@ -45,7 +45,9 @@ class PubMedSearcher:
         max_records: Optional[int] = None,
         rerank: str = "referenced_by",
         start_year: Optional[int] = None,
-        end_year: Optional[int] = None
+        end_year: Optional[int] = None,
+        start_date: Optional[str] = None,
+        end_date: Optional[str] = None
     ) -> List[Dict[str, Any]]:
         """
         Search PubMed for articles matching the query.
@@ -55,14 +57,21 @@ class PubMedSearcher:
             max_results: Maximum number of results to fetch from initial search
             max_records: Maximum number of articles to return in final results
             rerank: Reranking method ("referenced_by" or None)
-            start_year: Start year for publication date filter (optional)
-            end_year: End year for publication date filter (optional)
+            start_year: Start year for publication date filter (optional, deprecated - use start_date)
+            end_year: End year for publication date filter (optional, deprecated - use end_date)
+            start_date: Start date in YYYY/MM/DD format (optional)
+            end_date: End date in YYYY/MM/DD format (optional)
 
         Returns:
             List of article dictionaries containing metadata and abstracts
         """
         # Add date filter to query if provided
-        if start_year or end_year:
+        # Prefer start_date/end_date over start_year/end_year
+        if start_date or end_date:
+            date_filter = self._build_date_filter_with_dates(start_date, end_date)
+            filtered_query = f"{query} AND {date_filter}"
+            logger.info(f"Searching PubMed for: {query} (filtered: {filtered_query})")
+        elif start_year or end_year:
             date_filter = self._build_date_filter(start_year, end_year)
             filtered_query = f"{query} AND {date_filter}"
             logger.info(f"Searching PubMed for: {query} (filtered: {filtered_query})")
@@ -162,13 +171,33 @@ class PubMedSearcher:
         return pmids
 
     def _build_date_filter(self, start_year: Optional[int] = None, end_year: Optional[int] = None) -> str:
-        """Build date filter for PubMed query."""
+        """Build date filter for PubMed query (year-based, deprecated)."""
         if start_year and end_year:
             return f"({start_year}[PDAT]:{end_year}[PDAT])"
         elif start_year:
             return f"{start_year}:3000[PDAT]"
         elif end_year:
             return f"1900:{end_year}[PDAT]"
+        return ""
+
+    def _build_date_filter_with_dates(self, start_date: Optional[str] = None, end_date: Optional[str] = None) -> str:
+        """
+        Build date filter for PubMed query with full dates (YYYY/MM/DD).
+        Uses PDAT (Publication Date) which supports day-level precision.
+
+        Args:
+            start_date: Start date in YYYY/MM/DD format
+            end_date: End date in YYYY/MM/DD format
+
+        Returns:
+            Date filter string for PubMed query
+        """
+        if start_date and end_date:
+            return f"({start_date}[PDAT]:{end_date}[PDAT])"
+        elif start_date:
+            return f"{start_date}:3000[PDAT]"
+        elif end_date:
+            return f"1900/01/01:{end_date}[PDAT]"
         return ""
 
     def _extract_article_data(self, article_element: Element) -> Dict[str, Any]:

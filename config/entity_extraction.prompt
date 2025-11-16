@@ -1,0 +1,27 @@
+Extract medical entities from the abstract in JSON format:
+{
+  "drugs": [{"name": "drug name", "context": "how it is used"}],
+  "adverse_events": [{"event": "adverse event name", "severity": "mild/moderate/severe/unknown", "context": "details about the event"}],
+  "demographics": {
+    "age": "age range or mean age (e.g., 65±10, 18-65)",
+    "gender": "Male/Female/Both/Unknown",
+    "race": "race or ethnicity if mentioned",
+    "pregnancy": "pregnancy status if mentioned (e.g., pregnant, not pregnant, trimester, Unknown)",
+    "bmi": "BMI or body mass index if mentioned (e.g., 25.3, overweight, Unknown)",
+    "sample_size": 0
+  },
+  "diseases": ["disease1", "disease2", "disease3", "disease4", "..."]
+}
+
+Instructions:
+- Extract ALL drugs mentioned in the text
+- Extract ALL adverse events/side effects mentioned
+- For demographics, carefully look for:
+  - age: mean age, age range, median age (e.g., 65±10 years, 18-65 years)
+  - gender: Male, Female, Both, or Unknown
+  - race: ethnicity or race if mentioned (e.g., Caucasian, African American, Asian, Hispanic)
+  - pregnancy: pregnancy status if mentioned (e.g., "pregnant women", "first trimester", "not pregnant")
+  - bmi: body mass index or weight status (e.g., "BMI 28.5", "obese", "overweight")
+  - sample_size: n=X, X patients, X participants, X subjects
+- Extract ALL diseases/conditions mentioned (not limited to 2-3, can be many)
+- Return ONLY the JSON object, no explanations or other text

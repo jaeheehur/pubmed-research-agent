@@ -2,15 +2,30 @@
 
 의료 문헌 검색 및 Entity Extraction을 위한 AI Agent
 
+GGUF 양자화 모델과 Metal GPU 가속으로 Mac에서 빠른 의료 entity 추출을 제공합니다.
+
 ## 빠른 시작
 
-### 1. 환경 설정
+### 1. 의존성 설치
 
 ```bash
+# 가상 환경 활성화
 conda activate pubmed_py312
+
+# 패키지 설치
+pip install -r requirements.txt
+
+# macOS: Metal GPU 가속 지원 (권장)
+CMAKE_ARGS="-DLLAMA_METAL=on" pip install llama-cpp-python
+
+# Linux/Windows: CUDA GPU 가속
+CMAKE_ARGS="-DLLAMA_CUDA=on" pip install llama-cpp-python
+
+# CPU만 사용 (느림)
+pip install llama-cpp-python
 ```
 
-### 2. GGUF 모델 다운로드 (Mac에서 빠른 추론)
+### 2. GGUF 모델 다운로드
 
 ```bash
 # 설치된 모델 확인 또는 새로운 모델 다운로드
@@ -32,29 +47,32 @@ streamlit run app.py
 - **JSL-MedLlama-3-8B Q4_K_M**: 균형잡힌 선택 ✅ (~5GB)
 - **기타**: BioMistral, Llama-3.2, TinyLlama
 
-### Transformers 모델 (느림)
-- Kimi-K2-Thinking
-- JSL-MedLlama-3-8B-v2.0
-
 ### Rule-based (가장 빠름)
-- 키워드 기반 extraction
+- 키워드 및 정규식 기반 extraction
+- Config 파일 기반 demographics 추출
 
 ## 성능 비교 (Mac M2 Pro)
 
 | 모델 유형 | 속도 | 정확도 | 권장 |
 |-----------|------|--------|------|
-| **GGUF (Q4)** | 3-5초 ⚡ | ⭐⭐⭐⭐ | ✅ |
-| Transformers | 30-60초 🐌 | ⭐⭐⭐⭐⭐ | ❌ |
-| Rule-based | 0.1초 🚀 | ⭐⭐ | 빠른 탐색용 |
+| **GGUF (Q4)** | 3-5초 ⚡ | ⭐⭐⭐⭐ | ✅ 균형잡힌 선택 |
+| **GGUF (Q6)** | 20-30초 | ⭐⭐⭐⭐⭐ | 높은 정확도 필요시 |
+| Rule-based | 0.1초 🚀 | ⭐⭐⭐ | 빠른 탐색용 |
 
 ## 주요 기능
 
 1. **PubMed 검색**: NCBI E-utilities API 사용
 2. **Entity Extraction**:
-   - 약물/의약품
-   - 부작용 (Adverse Events)
-   - 환자 인구통계
-   - 질병/증상
+   - 약물/의약품 (Drugs)
+   - 부작용 (Adverse Events) - 심각도 포함
+   - 환자 인구통계 (Demographics):
+     - 나이 (Age)
+     - 성별 (Gender)
+     - 인종/민족 (Race/Ethnicity)
+     - 임신 여부 (Pregnancy Status) 🆕
+     - BMI 🆕
+     - 샘플 크기 (Sample Size)
+   - 질병/증상 (Diseases)
 3. **시각화**: Plotly 차트
 4. **내보내기**: JSON, 텍스트 리포트
 
@@ -63,10 +81,12 @@ streamlit run app.py
 ```
 .
 ├── app.py                      # Streamlit 웹 인터페이스
-├── agent.py                    # Transformers 기반 agent
-├── agent_gguf.py              # GGUF 기반 agent (빠름)
+├── agent_gguf.py              # GGUF 기반 agent (Metal GPU 가속)
 ├── download_gguf_model.py     # GGUF 모델 다운로드/선택
 ├── list_installed_models.py   # 설치된 모델 확인
+├── config/                    # 설정 파일
+│   ├── entity_extraction.prompt      # LLM extraction prompt
+│   └── demographics_config.json      # Demographics 추출 규칙
 ├── tools/                     # PubMed 검색 도구
 ├── utils/                     # Entity extraction
 └── requirements.txt

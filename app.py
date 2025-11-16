@@ -12,7 +12,6 @@ import plotly.express as px
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from pathlib import Path
-from agent import PubMedResearchAgent
 
 # GGUF 모델 지원 확인
 try:
@@ -104,7 +103,7 @@ def highlight_entities_in_text(text: str, entities: dict) -> str:
         if disease:
             entity_map.append({'text': disease, 'type': 'disease', 'label': '🏥 Disease'})
 
-    # Add demographics (age, gender, ethnicity, sample size patterns)
+    # Add demographics (age, gender, race, pregnancy, bmi, sample size patterns)
     demo = entities.get('demographics', {})
     if demo:
         # Age
@@ -119,9 +118,36 @@ def highlight_entities_in_text(text: str, entities: dict) -> str:
                 # Don't add generic keywords, they're too common
                 pass
 
+        # Race/ethnicity
+        race = demo.get('race', demo.get('ethnicity', ''))  # Support both field names
+        if race and race != 'Unknown' and len(race) > 3:  # Avoid short generic terms
+            entity_map.append({'text': race, 'type': 'demographics', 'label': '👤 Demographics'})
+
+        # Pregnancy (if it's a short match, show it)
+        pregnancy = demo.get('pregnancy', '')
+        if pregnancy and pregnancy != 'Unknown' and len(pregnancy) < 100:
+            entity_map.append({'text': pregnancy, 'type': 'demographics', 'label': '👤 Demographics'})
+
+        # BMI (if it's a short match, show it)
+        bmi = demo.get('bmi', '')
+        if bmi and bmi != 'Unknown' and len(bmi) < 100:
+            entity_map.append({'text': bmi, 'type': 'demographics', 'label': '👤 Demographics'})
+
         # Sample size patterns
         sample_size = demo.get('sample_size', 0)
-        if sample_size > 0:
+        # Convert to int if it's a string (e.g., "102" or "n=102")
+        if isinstance(sample_size, str):
+            # Try to extract number from string like "n=102" or "102"
+            number_match = re.search(r'\d+', sample_size)
+            if number_match:
+                try:
+                    sample_size = int(number_match.group(0))
+                except ValueError:
+                    sample_size = 0
+            else:
+                sample_size = 0
+
+        if sample_size and sample_size > 0:
             # Try to find the exact phrase in text
             size_patterns = [
                 rf'\b{sample_size}\s+patients\b',
@@ -233,7 +259,7 @@ with st.sidebar:
     )
 
     # Model selection
-    st.subheader("🤖 Entity Extraction Model")
+    st.subheader("💡 Entity Extraction Model")
 
     # 기본 모델 옵션
     model_options = {
@@ -280,7 +306,7 @@ with st.sidebar:
                     st.success(f"✅ {selected_model} loaded! ({model_config['size']})")
                 else:
                     # Rule-based
-                    st.session_state.agent = PubMedResearchAgent(
+                    st.session_state.agent = PubMedResearchAgentGGUF(
                         use_llm=False,
                         pubmed_email=pubmed_email
                     )
@@ -345,22 +371,17 @@ if search_button:
         st.session_state.current_page = 1  # Reset to first page
         with st.spinner(f"Searching PubMed for: '{query}'..."):
             try:
-                # Convert dates to years for PubMed API
-                start_year = start_date.year
-                start_month = start_date.month
-                start_day = start_date.day
-
-                end_year = end_date.year
-                end_month = end_date.month
-                end_day = end_date.day
+                # Convert dates to YYYY/MM/DD format for PubMed API
+                start_date_str = start_date.strftime("%Y/%m/%d")
+                end_date_str = end_date.strftime("%Y/%m/%d")
 
                 results = st.session_state.agent.search_and_extract(
                     query=query,
                     max_results=max_results,
                     max_records=None,  # Get all results, we'll paginate in the UI
                     extract_entities=True,  # Always extract entities
-                    start_year=start_year,
-                    end_year=end_year
+                    start_date=start_date_str,
+                    end_date=end_date_str
                 )
 
                 # Sort articles by publication date (newest first)
@@ -583,7 +604,9 @@ if st.session_state.results:
             all_aes = {}
             all_diseases = {}
             all_genders = {}
-            all_ethnicities = {}
+            all_races = {}
+            all_pregnancy = {}
+            all_bmi = {}
 
             for entity_data in results['entities']:
                 entities = entity_data['entities']
@@ -596,16 +619,25 @@ if st.session_state.results:
                 for disease in entities.get('diseases', []):
                     if disease:
                         all_diseases[disease] = all_diseases.get(disease, 0) + 1
-                
+
                 demo = entities.get('demographics', {})
                 if demo:
                     gender = demo.get('gender', 'Unknown')
                     if gender and gender != 'Unknown':
                         all_genders[gender] = all_genders.get(gender, 0) + 1
-                    
-                    ethnicity = demo.get('ethnicity', 'Unknown')
-                    if ethnicity and ethnicity != 'Unknown':
-                        all_ethnicities[ethnicity] = all_ethnicities.get(ethnicity, 0) + 1
+
+                    # Support both 'race' and 'ethnicity' field names
+                    race = demo.get('race', demo.get('ethnicity', 'Unknown'))
+                    if race and race != 'Unknown':
+                        all_races[race] = all_races.get(race, 0) + 1
+
+                    pregnancy = demo.get('pregnancy', 'Unknown')
+                    if pregnancy and pregnancy != 'Unknown' and len(pregnancy) < 50:
+                        all_pregnancy[pregnancy] = all_pregnancy.get(pregnancy, 0) + 1
+
+                    bmi = demo.get('bmi', 'Unknown')
+                    if bmi and bmi != 'Unknown' and len(bmi) < 50:
+                        all_bmi[bmi] = all_bmi.get(bmi, 0) + 1
 
             # Create three columns for charts
             col1, col2, col3 = st.columns(3)
@@ -651,13 +683,25 @@ if st.session_state.results:
                 else:
                     st.info("No gender data to visualize.")
 
-                if all_ethnicities:
-                    ethnicity_df = pd.DataFrame(list(all_ethnicities.items()), columns=['Ethnicity', 'Count'])
-                    fig_bar = px.bar(ethnicity_df, x='Count', y='Ethnicity', orientation='h', title='Ethnicity Distribution')
+                if all_races:
+                    race_df = pd.DataFrame(list(all_races.items()), columns=['Race/Ethnicity', 'Count'])
+                    fig_bar = px.bar(race_df, x='Count', y='Race/Ethnicity', orientation='h', title='Race/Ethnicity Distribution')
                     fig_bar.update_layout(yaxis={'categoryorder':'total ascending'})
                     st.plotly_chart(fig_bar, use_container_width=True)
                 else:
-                    st.info("No ethnicity data to visualize.")
+                    st.info("No race/ethnicity data to visualize.")
+
+                if all_pregnancy:
+                    pregnancy_df = pd.DataFrame(list(all_pregnancy.items()), columns=['Pregnancy Status', 'Count'])
+                    fig_bar = px.bar(pregnancy_df, x='Count', y='Pregnancy Status', orientation='h', title='Pregnancy Status')
+                    fig_bar.update_layout(yaxis={'categoryorder':'total ascending'})
+                    st.plotly_chart(fig_bar, use_container_width=True)
+
+                if all_bmi:
+                    bmi_df = pd.DataFrame(list(all_bmi.items()), columns=['BMI', 'Count'])
+                    fig_bar = px.bar(bmi_df, x='Count', y='BMI', orientation='h', title='BMI Distribution')
+                    fig_bar.update_layout(yaxis={'categoryorder':'total ascending'})
+                    st.plotly_chart(fig_bar, use_container_width=True)
 
         else:
             st.info("No entity extraction performed. Enable 'Extract Entities' in the sidebar.")

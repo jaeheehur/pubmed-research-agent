@@ -6,6 +6,7 @@ Extracts drugs, adverse events, and patient demographics from medical abstracts
 import logging
 import json
 import os
+import re
 from typing import Dict, List, Any, Optional
 from dataclasses import dataclass, asdict
 from pathlib import Path
@@ -24,7 +25,7 @@ class ExtractedEntities:
     """Data class for extracted medical entities"""
     drugs: List[Dict[str, str]]  # [{name: str, context: str}]
     adverse_events: List[Dict[str, str]]  # [{event: str, severity: str, context: str}]
-    demographics: Dict[str, Any]  # {age: str, gender: str, ethnicity: str, sample_size: int}
+    demographics: Dict[str, Any]  # {age: str, gender: str, race: str, pregnancy: str, bmi: str, sample_size: int}
     diseases: List[str]  # List of diseases/conditions mentioned
 
     def to_dict(self) -> Dict[str, Any]:
@@ -49,6 +50,7 @@ class EntityExtractor:
         """
         self.model = model_pipeline
         self.extraction_prompt = self._build_extraction_prompt()
+        self.demographics_config = self._load_demographics_config()
 
         # Detect model type for special handling
         self.model_name = None
@@ -59,10 +61,29 @@ class EntityExtractor:
             except:
                 logger.debug("Could not detect model name")
 
+    def _load_demographics_config(self) -> Dict[str, Any]:
+        """Load demographics extraction configuration from JSON file"""
+        config_file = Path(__file__).parent.parent / "config" / "demographics_config.json"
+        try:
+            with open(config_file, 'r', encoding='utf-8') as f:
+                config = json.load(f)
+            logger.info(f"Loaded demographics config from {config_file}")
+            return config
+        except Exception as e:
+            logger.error(f"Failed to load demographics config: {e}")
+            # Return minimal config
+            return {
+                "entity_types": {},
+                "extraction_settings": {
+                    "case_sensitive": False,
+                    "context_window": 50
+                }
+            }
+
     def _build_extraction_prompt(self) -> str:
         """Build system prompt for entity extraction"""
         # Load extraction prompt from file
-        prompt_file = Path(__file__).parent.parent / "entity_extraction.prompt"
+        prompt_file = Path(__file__).parent.parent / "config" / "entity_extraction.prompt"
         try:
             prompt = prompt_file.read_text(encoding='utf-8').strip()
             logger.debug(f"Loaded extraction prompt from {prompt_file}")
@@ -74,14 +95,27 @@ class EntityExtractor:
 {
   "drugs": [{"name": "drug name", "context": "how it is used"}],
   "adverse_events": [{"event": "adverse event name", "severity": "mild/moderate/severe/unknown", "context": "details about the event"}],
-  "demographics": {"age": "age range or mean age (e.g., 65±10, 18-65)", "gender": "Male/Female/Both/Unknown", "ethnicity": "ethnicity or race if mentioned", "sample_size": 0},
+  "demographics": {
+    "age": "age range or mean age (e.g., 65±10, 18-65)",
+    "gender": "Male/Female/Both/Unknown",
+    "race": "race or ethnicity if mentioned",
+    "pregnancy": "pregnancy status if mentioned (e.g., pregnant, not pregnant, trimester, Unknown)",
+    "bmi": "BMI or body mass index if mentioned (e.g., 25.3, overweight, Unknown)",
+    "sample_size": 0
+  },
   "diseases": ["disease1", "disease2", "disease3", "disease4", "..."]
 }
 
 Instructions:
 - Extract ALL drugs mentioned in the text
 - Extract ALL adverse events/side effects mentioned
-- For demographics: carefully look for age (mean age, age range, median age), gender distribution, ethnicity/race, and sample size (n=X, X patients, X participants, X subjects)
+- For demographics, carefully look for:
+  - age: mean age, age range, median age (e.g., 65±10 years, 18-65 years)
+  - gender: Male, Female, Both, or Unknown
+  - race: ethnicity or race if mentioned (e.g., Caucasian, African American, Asian, Hispanic)
+  - pregnancy: pregnancy status if mentioned (e.g., "pregnant women", "first trimester", "not pregnant")
+  - bmi: body mass index or weight status (e.g., "BMI 28.5", "obese", "overweight")
+  - sample_size: n=X, X patients, X participants, X subjects
 - Extract ALL diseases/conditions mentioned (not limited to 2-3, can be many)
 - Return ONLY the JSON object, no explanations or other text"""
 
@@ -259,12 +293,9 @@ Abstract:
         drugs = []
         adverse_events = []
         diseases = []
-        demographics = {
-            "age": "Unknown",
-            "gender": "Unknown",
-            "ethnicity": "Unknown",
-            "sample_size": 0
-        }
+
+        # Extract demographics using config-based method
+        demographics = self._extract_demographics(text)
 
         # Common drug names and patterns
         drug_patterns = [
@@ -319,44 +350,6 @@ Abstract:
                 if disease_name not in diseases:
                     diseases.append(disease_name)
 
-        # Find sample size
-        size_patterns = [
-            r'(\d+)\s+patients',
-            r'(\d+)\s+participants',
-            r'(\d+)\s+subjects',
-            r'n\s*=\s*(\d+)',
-            r'sample size[:\s]+(\d+)'
-        ]
-
-        for pattern in size_patterns:
-            match = re.search(pattern, text_lower)
-            if match:
-                demographics['sample_size'] = int(match.group(1))
-                break
-
-        # Detect gender
-        if 'male' in text_lower and 'female' in text_lower:
-            demographics['gender'] = 'Both'
-        elif 'male' in text_lower:
-            demographics['gender'] = 'Male'
-        elif 'female' in text_lower:
-            demographics['gender'] = 'Female'
-
-        # Age detection
-        age_patterns = [
-            r'age[d]?\s+(\d+\s*±\s*\d+)',
-            r'mean age[:\s]+(\d+)',
-            r'age[:\s]+(\d+[-–]\d+)',
-            r'(\d+)\s+years old',
-            r'age[d]?\s+(\d+)\s+years?'
-        ]
-
-        for pattern in age_patterns:
-            age_match = re.search(pattern, text_lower)
-            if age_match:
-                demographics['age'] = age_match.group(1)
-                break
-
         return ExtractedEntities(
             drugs=drugs,
             adverse_events=adverse_events,
@@ -371,17 +364,170 @@ Abstract:
         context = text[context_start:context_end].strip()
         return context
 
+    def _extract_demographics(self, text: str) -> Dict[str, Any]:
+        """Extract demographics using config-based patterns and keywords"""
+        import re
+
+        demographics = {
+            "age": "Unknown",
+            "gender": "Unknown",
+            "race": "Unknown",
+            "pregnancy": "Unknown",
+            "bmi": "Unknown",
+            "sample_size": 0
+        }
+
+        if not self.demographics_config or not self.demographics_config.get('entity_types'):
+            logger.warning("Demographics config not loaded, using basic extraction")
+            return demographics
+
+        entity_types = self.demographics_config['entity_types']
+        settings = self.demographics_config.get('extraction_settings', {})
+        case_sensitive = settings.get('case_sensitive', False)
+        context_window = settings.get('context_window', 50)
+
+        text_to_search = text if case_sensitive else text.lower()
+
+        # Extract AGE
+        if 'AGE' in entity_types:
+            age_config = entity_types['AGE']
+            if age_config.get('type') == 'regex':
+                for pattern in age_config.get('patterns', []):
+                    try:
+                        flags = 0 if case_sensitive else re.IGNORECASE
+                        match = re.search(pattern, text, flags=flags)
+                        if match:
+                            # Extract the matched age information
+                            demographics['age'] = match.group(0).strip()
+                            logger.debug(f"Extracted age: {demographics['age']}")
+                            break
+                    except Exception as e:
+                        logger.debug(f"Error matching age pattern {pattern}: {e}")
+
+        # Extract GENDER
+        if 'GENDER' in entity_types:
+            gender_config = entity_types['GENDER']
+            if gender_config.get('type') == 'keyword':
+                keywords = gender_config.get('keywords', [])
+                male_found = any(kw in text_to_search for kw in ['male', 'man', 'men', 'boy'] if kw in keywords)
+                female_found = any(kw in text_to_search for kw in ['female', 'woman', 'women', 'girl'] if kw in keywords)
+
+                if male_found and female_found:
+                    demographics['gender'] = 'Both'
+                elif male_found:
+                    demographics['gender'] = 'Male'
+                elif female_found:
+                    demographics['gender'] = 'Female'
+
+                logger.debug(f"Extracted gender: {demographics['gender']}")
+
+        # Extract RACE/ETHNICITY
+        if 'RACE' in entity_types:
+            race_config = entity_types['RACE']
+            if race_config.get('type') == 'keyword':
+                keywords = race_config.get('keywords', [])
+                for keyword in keywords:
+                    search_keyword = keyword if case_sensitive else keyword.lower()
+                    if search_keyword in text_to_search:
+                        # Find the actual match in the original text to preserve case
+                        pattern = re.escape(keyword)
+                        flags = 0 if case_sensitive else re.IGNORECASE
+                        match = re.search(pattern, text, flags=flags)
+                        if match:
+                            demographics['race'] = match.group(0).capitalize()
+                            logger.debug(f"Extracted race: {demographics['race']}")
+                            break
+
+        # Extract PREGNANCY
+        if 'PREGNANCY' in entity_types:
+            pregnancy_config = entity_types['PREGNANCY']
+            if pregnancy_config.get('type') == 'keyword':
+                keywords = pregnancy_config.get('keywords', [])
+                for keyword in keywords:
+                    search_keyword = keyword if case_sensitive else keyword.lower()
+                    if search_keyword in text_to_search:
+                        # Extract context around the match
+                        pattern = re.escape(keyword)
+                        flags = 0 if case_sensitive else re.IGNORECASE
+                        match = re.search(pattern, text, flags=flags)
+                        if match:
+                            context = self._extract_context(text, match.start(), match.end(), context_window)
+                            demographics['pregnancy'] = context
+                            logger.debug(f"Extracted pregnancy: {demographics['pregnancy'][:50]}...")
+                            break
+
+        # Extract BMI
+        if 'BMI' in entity_types:
+            bmi_config = entity_types['BMI']
+            if bmi_config.get('type') == 'keyword':
+                keywords = bmi_config.get('keywords', [])
+                for keyword in keywords:
+                    search_keyword = keyword if case_sensitive else keyword.lower()
+                    if search_keyword in text_to_search:
+                        # Extract context around the match
+                        pattern = re.escape(keyword)
+                        flags = 0 if case_sensitive else re.IGNORECASE
+                        match = re.search(pattern, text, flags=flags)
+                        if match:
+                            context = self._extract_context(text, match.start(), match.end(), context_window)
+                            demographics['bmi'] = context
+                            logger.debug(f"Extracted BMI: {demographics['bmi'][:50]}...")
+                            break
+
+        # Extract SAMPLE_SIZE
+        if 'SAMPLE_SIZE' in entity_types:
+            sample_config = entity_types['SAMPLE_SIZE']
+            if sample_config.get('type') == 'regex':
+                for pattern in sample_config.get('patterns', []):
+                    try:
+                        flags = 0 if case_sensitive else re.IGNORECASE
+                        match = re.search(pattern, text, flags=flags)
+                        if match:
+                            # Extract the number from the match
+                            # Remove commas and convert to int
+                            number_str = match.group(1).replace(',', '')
+                            demographics['sample_size'] = int(number_str)
+                            logger.debug(f"Extracted sample size: {demographics['sample_size']}")
+                            break
+                    except Exception as e:
+                        logger.debug(f"Error matching sample size pattern {pattern}: {e}")
+
+        return demographics
+
     def _dict_to_entities(self, data: Dict[str, Any]) -> ExtractedEntities:
         """Convert dictionary to ExtractedEntities"""
+        # Handle both old (ethnicity) and new (race) field names for backwards compatibility
+        demographics_data = data.get('demographics', {})
+        if 'ethnicity' in demographics_data and 'race' not in demographics_data:
+            demographics_data['race'] = demographics_data.pop('ethnicity')
+
+        # Normalize sample_size to integer
+        if demographics_data and 'sample_size' in demographics_data:
+            sample_size = demographics_data['sample_size']
+            if isinstance(sample_size, str):
+                # Try to extract number from string like "n=102", "n = 102", or "102"
+                number_match = re.search(r'\d+', sample_size)
+                if number_match:
+                    try:
+                        demographics_data['sample_size'] = int(number_match.group(0))
+                    except ValueError:
+                        demographics_data['sample_size'] = 0
+                else:
+                    demographics_data['sample_size'] = 0
+            elif not isinstance(sample_size, int):
+                demographics_data['sample_size'] = 0
+
         return ExtractedEntities(
             drugs=data.get('drugs', []),
             adverse_events=data.get('adverse_events', []),
-            demographics=data.get('demographics', {
+            demographics=demographics_data if demographics_data else {
                 "age": "Unknown",
                 "gender": "Unknown",
-                "ethnicity": "Unknown",
+                "race": "Unknown",
+                "pregnancy": "Unknown",
+                "bmi": "Unknown",
                 "sample_size": 0
-            }),
+            },
             diseases=data.get('diseases', [])
         )
 
@@ -393,7 +539,9 @@ Abstract:
             demographics={
                 "age": "Unknown",
                 "gender": "Unknown",
-                "ethnicity": "Unknown",
+                "race": "Unknown",
+                "pregnancy": "Unknown",
+                "bmi": "Unknown",
                 "sample_size": 0
             },
             diseases=[]
