@@ -511,34 +511,51 @@ if search_button:
                 total_start_time = time.time()
                 article_start_time = time.time()
 
+                # Track average processing time for better time estimates
+                processing_times = []
+
                 for i, article in enumerate(articles, 1):
                     # Reset article timer for each new article
                     article_start_time = time.time()
 
+                    # Calculate estimated time based on average
+                    if processing_times:
+                        avg_time = sum(processing_times) / len(processing_times)
+                        remaining = len(articles) - i + 1
+                        est_mins = int((avg_time * remaining) // 60)
+                        est_secs = int((avg_time * remaining) % 60)
+                        est_text = f" (Est. {est_mins:02d}:{est_secs:02d} left)"
+                    else:
+                        est_text = ""
+
                     # Update progress
-                    progress = i / len(articles)
+                    progress = (i - 1) / len(articles)
                     with progress_col1:
                         progress_bar.progress(
                             progress,
-                            text=f"Processing article {i}/{len(articles)}: {article.get('title', 'Unknown')[:60]}..."
+                            text=f"Processing {i}/{len(articles)}: {article.get('title', 'Unknown')[:50]}...{est_text}"
                         )
 
-                    # Extract entities (with real-time timer update)
+                    # Show processing indicator
+                    with progress_col2:
+                        timer_placeholder.markdown(f"<div style='text-align: right; font-size: 13px; color: #666; margin-top: 8px;'>⏱️ ...</div>", unsafe_allow_html=True)
+
+                    # Extract entities
                     abstract = article.get('abstract', '')
                     if abstract:
                         try:
-                            # Show processing timer (starts at 00:00 for each article)
-                            with progress_col2:
-                                timer_placeholder.markdown(f"<div style='text-align: right; font-size: 13px; color: #666; margin-top: 8px;'>⏱️ 00:00</div>", unsafe_allow_html=True)
-
                             entities = st.session_state.agent.extractor.extract(abstract)
 
-                            # Show time taken for this article (updates after extraction)
-                            article_elapsed = int(time.time() - article_start_time)
-                            article_mins = article_elapsed // 60
-                            article_secs = article_elapsed % 60
+                            # Calculate time taken
+                            article_elapsed = time.time() - article_start_time
+                            processing_times.append(article_elapsed)
+
+                            article_mins = int(article_elapsed) // 60
+                            article_secs = int(article_elapsed) % 60
+
+                            # Show time taken
                             with progress_col2:
-                                timer_placeholder.markdown(f"<div style='text-align: right; font-size: 13px; color: #666; margin-top: 8px;'>⏱️ {article_mins:02d}:{article_secs:02d}</div>", unsafe_allow_html=True)
+                                timer_placeholder.markdown(f"<div style='text-align: right; font-size: 13px; color: #10b981; margin-top: 8px;'>✓ {article_mins:02d}:{article_secs:02d}</div>", unsafe_allow_html=True)
 
                             results["entities"].append({
                                 "pmid": article.get('pmid'),
