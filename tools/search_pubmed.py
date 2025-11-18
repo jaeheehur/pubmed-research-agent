@@ -155,7 +155,7 @@ class PubMedSearcher:
             "term": query,
             "retmax": max_results,
             "retmode": "json",
-            "sort": "relevance"
+            "sort": "pub_date"  # Most Recent (publication date)
         }
 
         if self.email:
@@ -167,7 +167,7 @@ class PubMedSearcher:
         data = response.json()
         pmids = data.get("esearchresult", {}).get("idlist", [])
 
-        logger.info(f"Found {len(pmids)} article PMIDs")
+        logger.info(f"Found {len(pmids)} article PMIDs (sorted by Most Recent)")
         return pmids
 
     def _build_date_filter(self, start_year: Optional[int] = None, end_year: Optional[int] = None) -> str:

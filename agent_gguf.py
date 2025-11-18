@@ -35,13 +35,24 @@ class GGUFEntityExtractor:
 
             self.llm = Llama(
                 model_path=model_path,
-                n_ctx=4096,  # Increased context window (원래 모델의 절반)
+                n_ctx=2048,  # Reduced context window to prevent segfaults
                 n_gpu_layers=n_gpu_layers,  # Use Metal GPU on Mac
                 verbose=False,  # Metal 경고 숨김
-                n_threads=4  # CPU 스레드 수 제한
+                n_threads=2,  # Reduced CPU threads for stability
+                n_batch=512  # Smaller batch size for better stability
             )
             logger.info("GGUF model loaded successfully")
             self.available = True
+
+            # Detect model type from path
+            model_path_lower = model_path.lower()
+            if 'biomistral' in model_path_lower or 'mistral' in model_path_lower:
+                self.model_type = 'mistral'
+            elif 'llama' in model_path_lower or 'medllama' in model_path_lower:
+                self.model_type = 'llama'
+            else:
+                self.model_type = 'generic'
+            logger.info(f"Detected model type: {self.model_type}")
 
         except ImportError:
             logger.error("llama-cpp-python not installed. Install with:")
@@ -104,45 +115,119 @@ Abstract:
 
 JSON:"""
 
-            # Use Llama 3 chat template format (without <|begin_of_text|> - llama.cpp adds it automatically)
-            full_prompt = f"""<|start_header_id|>system<|end_header_id|>
+            # Choose prompt format based on model type
+            if self.model_type == 'mistral':
+                # Mistral/BioMistral format: [INST] ... [/INST]
+                # More detailed and structured prompt for better entity extraction
+                full_prompt = f"""[INST] You are a medical entity extraction specialist. Your task is to carefully analyze the following medical abstract and extract ALL relevant entities.
 
-You are a medical entity extraction assistant. Your task is to extract ALL medical entities from abstracts and return them in valid JSON format. Be thorough and extract:
-- ALL drug names mentioned (including vaccines, medications, and treatments)
-- ALL adverse events or side effects
-- ALL demographics information (age, gender, race/ethnicity, pregnancy status, BMI, sample size)
-- ALL diseases and medical conditions mentioned<|eot_id|><|start_header_id|>user<|end_header_id|>
+INSTRUCTIONS:
+1. Extract ALL drug names, medications, vaccines, and treatments mentioned
+2. Extract ALL adverse events, side effects, and safety outcomes
+3. Extract ALL patient demographics (age, gender, race/ethnicity, sample size)
+4. Extract ALL diseases, conditions, and diagnoses mentioned
+5. Distinguish between diseases being TREATED vs adverse events CAUSED by treatment
+6. Be thorough - extract every relevant entity, even if mentioned only once
+
+Return your findings in this EXACT JSON structure:
+{{
+  "drugs": [
+    {{"name": "exact drug name from text", "context": "how it was used"}}
+  ],
+  "adverse_events": [
+    {{"event": "specific adverse event", "severity": "mild/moderate/severe/unknown", "context": "relevant details"}}
+  ],
+  "demographics": {{
+    "age": "age range or mean±SD",
+    "gender": "Male/Female/Both/Unknown",
+    "race": "ethnicity information",
+    "pregnancy": "pregnancy status if mentioned",
+    "bmi": "BMI information if available",
+    "sample_size": number_of_participants
+  }},
+  "diseases": ["disease1", "disease2"]
+}}
+
+ABSTRACT:
+{text.strip()}
+
+RESPOND WITH ONLY THE JSON OBJECT - NO ADDITIONAL TEXT:[/INST]
+
+"""
+                stop_tokens = ["</s>", "[INST]"]
+            elif self.model_type == 'llama':
+                # Llama 3 chat template format
+                full_prompt = f"""<|start_header_id|>system<|end_header_id|>
+
+You are a medical entity extraction assistant specialized in extracting entities from medical research abstracts.
+
+IMPORTANT INSTRUCTIONS:
+1. Extract ALL drug names, medications, vaccines, treatments, and therapeutic interventions (e.g., "acute headache treatments", "ibuprofen", "chemotherapy")
+2. Extract ALL adverse events, side effects, safety outcomes, and complications
+3. Extract ALL patient demographics: age, gender, race/ethnicity, pregnancy status, BMI, sample size
+4. Extract ALL diseases, medical conditions, disorders, and diagnoses mentioned
+5. Be comprehensive - extract EVERY relevant entity, even if mentioned only once
+6. Return ONLY a valid JSON object with NO additional text or explanations
+
+Your response must be in this exact JSON format:
+{{
+  "drugs": [{{"name": "drug/treatment name", "context": "how it was used"}}],
+  "adverse_events": [{{"event": "adverse event", "severity": "mild/moderate/severe/unknown", "context": "details"}}],
+  "demographics": {{"age": "age info", "gender": "Male/Female/Both/Unknown", "race": "race/ethnicity", "pregnancy": "pregnancy status", "bmi": "BMI info", "sample_size": number}},
+  "diseases": ["disease1", "disease2"]
+}}<|eot_id|><|start_header_id|>user<|end_header_id|>
 
 {user_message}<|eot_id|><|start_header_id|>assistant<|end_header_id|>
 
 """
+                stop_tokens = ["<|eot_id|>"]
+            else:
+                # Generic format
+                full_prompt = f"""You are a medical entity extraction assistant.
+
+{user_message}
+
+"""
+                stop_tokens = ["\n\n\n"]
 
             # Generate response
-            logger.debug(f"Calling GGUF model with prompt length: {len(full_prompt)}")
+            logger.debug(f"Calling GGUF model ({self.model_type}) with prompt length: {len(full_prompt)}")
 
             response = self.llm(
                 full_prompt,
-                max_tokens=1024,  # Increased for complete JSON response
+                max_tokens=2048,  # Increased for complete JSON response
                 temperature=0.1,
-                echo=False,  # Don't echo prompt since we're using chat template
-                stop=["<|eot_id|>"]  # Stop at end of turn token
+                echo=False,
+                stop=stop_tokens,
+                repeat_penalty=1.1,  # Prevent repetitive output
+                top_p=0.95  # Nucleus sampling for better quality
             )
 
             generated_text = response['choices'][0]['text'].strip()
             logger.debug(f"Raw response length: {len(generated_text)} chars")
 
             logger.info(f"Generated {len(generated_text)} chars")
-            logger.debug(f"Generated text preview: {generated_text[:200]}")
+            logger.debug(f"Full generated text:\n{generated_text}")  # Debug only
 
             # Parse JSON
             entities_dict = self._parse_json_response(generated_text)
 
-            if entities_dict and (entities_dict.get('drugs') or entities_dict.get('adverse_events') or entities_dict.get('diseases')):
+            # Convert to entities even if some fields are empty
+            # The model attempted extraction, so we should use its results
+            if entities_dict is not None:
                 entities_result = self._dict_to_entities(entities_dict)
-                logger.info(f"Successfully extracted: {len(entities_result.drugs)} drugs, {len(entities_result.adverse_events)} AEs, {len(entities_result.diseases)} diseases")
+                logger.info(f"Successfully extracted with GGUF: {len(entities_result.drugs)} drugs, {len(entities_result.adverse_events)} AEs, {len(entities_result.diseases)} diseases")
+
+                # If GGUF extraction is completely empty, try rule-based as fallback
+                if (len(entities_result.drugs) == 0 and
+                    len(entities_result.adverse_events) == 0 and
+                    len(entities_result.diseases) == 0):
+                    logger.warning("GGUF model returned no entities, falling back to rule-based")
+                    return self._extract_rule_based(text)
+
                 return entities_result
             else:
-                logger.warning("GGUF model returned empty entities, falling back to rule-based")
+                logger.warning("GGUF model failed to parse response, falling back to rule-based")
                 return self._extract_rule_based(text)
 
         except Exception as e:
@@ -152,22 +237,117 @@ You are a medical entity extraction assistant. Your task is to extract ALL medic
     def _parse_json_response(self, response: str) -> Dict[str, Any]:
         """Parse JSON from model response"""
         try:
-            # Find JSON object
-            if '{' in response:
+            # Check if response is empty
+            if not response or len(response.strip()) == 0:
+                logger.error("Empty response received for JSON parsing")
+                return self._empty_entities_dict()
+
+            # Log the raw response for debugging
+            logger.debug(f"Parsing response (first 500 chars): {response[:500]}")
+
+            # Try to find JSON in the response
+            # Look for content between ```json and ``` or { and }
+            json_str = None
+
+            if '```json' in response:
+                logger.debug("Found JSON code block with ```json")
+                start = response.find('```json') + 7
+                end = response.find('```', start)
+                json_str = response[start:end].strip()
+            elif '```' in response:
+                logger.debug("Found code block with ```")
+                start = response.find('```') + 3
+                end = response.find('```', start)
+                json_str = response[start:end].strip()
+            elif '{' in response:
+                logger.debug("Found JSON object with {")
                 start = response.find('{')
                 end = response.rfind('}') + 1
                 json_str = response[start:end]
             else:
+                logger.warning("No JSON markers found in response")
                 json_str = response
 
+            if not json_str or len(json_str.strip()) == 0:
+                logger.error("Extracted JSON string is empty")
+                logger.error(f"Original response: {response[:1000]}")
+                return self._empty_entities_dict()
+
+            logger.debug(f"Attempting to parse JSON (length: {len(json_str)} chars)")
             parsed = json.loads(json_str)
             logger.info(f"Successfully parsed JSON with {len(parsed.get('drugs', []))} drugs, {len(parsed.get('adverse_events', []))} AEs, {len(parsed.get('diseases', []))} diseases")
             logger.debug(f"Parsed content: {parsed}")
             return parsed
         except json.JSONDecodeError as e:
-            logger.error(f"Failed to parse JSON: {e}")
-            logger.debug(f"Response: {response[:500]}")
+            logger.warning(f"Failed to parse JSON: {e}")
+            logger.debug(f"JSON string attempted: {json_str[:1000] if json_str else 'None'}")
+
+            # Try to fix incomplete JSON
+            fixed_json = self._try_fix_json(json_str)
+            if fixed_json:
+                try:
+                    parsed = json.loads(fixed_json)
+                    logger.info(f"Successfully parsed fixed JSON with {len(parsed.get('drugs', []))} drugs, {len(parsed.get('adverse_events', []))} AEs")
+                    return parsed
+                except json.JSONDecodeError:
+                    logger.error("Failed to parse fixed JSON as well")
+
+            logger.error(f"Full response: {response[:1000]}")
             return self._empty_entities_dict()
+        except Exception as e:
+            logger.error(f"Unexpected error during JSON parsing: {e}", exc_info=True)
+            return self._empty_entities_dict()
+
+    def _try_fix_json(self, json_str: str) -> Optional[str]:
+        """Try to fix incomplete or malformed JSON"""
+        if not json_str or '{' not in json_str:
+            return None
+
+        try:
+            # Count braces and brackets
+            open_braces = json_str.count('{')
+            close_braces = json_str.count('}')
+            open_brackets = json_str.count('[')
+            close_brackets = json_str.count(']')
+
+            logger.info(f"JSON repair: {open_braces} {{ vs {close_braces} }}, {open_brackets} [ vs {close_brackets} ]")
+
+            # If JSON starts but is incomplete
+            fixed = json_str
+
+            # Close unclosed arrays
+            while open_brackets > close_brackets:
+                fixed += ']'
+                close_brackets += 1
+
+            # Close unclosed objects
+            while open_braces > close_braces:
+                fixed += '}'
+                close_braces += 1
+
+            # If the JSON ends with a comma, might need to add empty fields
+            if fixed.rstrip().endswith(','):
+                # Add missing fields with defaults
+                fixed = fixed.rstrip().rstrip(',')
+                # Check what's missing
+                if '"adverse_events"' not in fixed:
+                    fixed += ',\n  "adverse_events": []'
+                if '"demographics"' not in fixed:
+                    fixed += ',\n  "demographics": {"age": "Unknown", "gender": "Unknown", "race": "Unknown", "pregnancy": "Unknown", "bmi": "Unknown", "sample_size": 0}'
+                if '"diseases"' not in fixed:
+                    fixed += ',\n  "diseases": []'
+
+                # Close the object
+                if not fixed.endswith('}'):
+                    fixed += '\n}'
+
+            logger.info(f"Attempted JSON fix, new length: {len(fixed)}")
+            logger.debug(f"Fixed JSON:\n{fixed}")
+
+            return fixed
+        except Exception as e:
+            logger.error(f"Error during JSON fix attempt: {e}")
+            return None
 
     def _dict_to_entities(self, data: Dict[str, Any]) -> ExtractedEntities:
         """Convert dictionary to ExtractedEntities"""
