@@ -71,3 +71,9 @@ logs/
 
 # Scripts
 setup.sh
+*.sh
+
+# Backup files
+*_backup.py
+*_old.py
+app_old_backup.py
