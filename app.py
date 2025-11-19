@@ -221,11 +221,19 @@ if search_button:
                     if ae.get('event')
                 )) if results.get('entities') else 0
 
+                # Count demographics only if they have meaningful values (not 'Unknown' or empty)
                 unique_demographics = len(set(
                     f"{demo.get('age', '')}_{demo.get('gender', '')}_{demo.get('race', '')}"
                     for entity in results['entities']
                     for demo in [entity['entities'].get('demographics', {})]
-                    if demo and (demo.get('age') or demo.get('gender') or demo.get('race'))
+                    if demo and any([
+                        demo.get('age') and demo.get('age') != 'Unknown',
+                        demo.get('gender') and demo.get('gender') not in ['Unknown', ''],
+                        demo.get('race') and demo.get('race') not in ['Unknown', ''],
+                        demo.get('pregnancy') and demo.get('pregnancy') != 'Unknown',
+                        demo.get('bmi') and demo.get('bmi') != 'Unknown',
+                        demo.get('sample_size') and demo.get('sample_size') > 0
+                    ])
                 )) if results.get('entities') else 0
 
                 # Render summary card in Articles tab
