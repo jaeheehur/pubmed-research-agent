@@ -141,17 +141,20 @@ if search_button:
                             text=f"Processing {i}/{len(articles)}: {article.get('title', 'Unknown')[:50]}...{est_text}"
                         )
 
-                    # Show processing indicator
+                    # Show cumulative time before processing
+                    cumulative_elapsed = int(time.time() - total_start_time)
+                    cumulative_mins = cumulative_elapsed // 60
+                    cumulative_secs = cumulative_elapsed % 60
                     with progress_col2:
                         timer_placeholder.markdown(
-                            f"<div style='text-align: right; font-size: 13px; color: #666; margin-top: 8px;'>⏱️ ...</div>",
+                            f"<div style='text-align: right; font-size: 13px; color: #666; margin-top: 8px;'>⏱️ {cumulative_mins:02d}:{cumulative_secs:02d}</div>",
                             unsafe_allow_html=True
                         )
 
                     # Extract entities
                     abstract = article.get('abstract', '')
                     article_entities = None
-                    
+
                     if abstract:
                         try:
                             entities = st.session_state.agent.extractor.extract(abstract)
@@ -160,13 +163,14 @@ if search_button:
                             article_elapsed = time.time() - article_start_time
                             processing_times.append(article_elapsed)
 
-                            article_mins = int(article_elapsed) // 60
-                            article_secs = int(article_elapsed) % 60
+                            # Show cumulative time after processing this article
+                            cumulative_elapsed = int(time.time() - total_start_time)
+                            cumulative_mins = cumulative_elapsed // 60
+                            cumulative_secs = cumulative_elapsed % 60
 
-                            # Show time taken
                             with progress_col2:
                                 timer_placeholder.markdown(
-                                    f"<div style='text-align: right; font-size: 13px; color: #10b981; margin-top: 8px;'>✓ {article_mins:02d}:{article_secs:02d}</div>",
+                                    f"<div style='text-align: right; font-size: 13px; color: #10b981; margin-top: 8px;'>✓ {cumulative_mins:02d}:{cumulative_secs:02d}</div>",
                                     unsafe_allow_html=True
                                 )
 
@@ -185,7 +189,7 @@ if search_button:
                     with articles_container:
                         render_article_tab_content(article, article_entities, i)
 
-                # Finalize progress and show total time
+                # Finalize progress and show total extraction time
                 total_elapsed = int(time.time() - total_start_time)
                 total_mins = total_elapsed // 60
                 total_secs = total_elapsed % 60
@@ -194,7 +198,7 @@ if search_button:
                     progress_bar.progress(1.0, text="✅ All articles processed!")
                 with progress_col2:
                     timer_placeholder.markdown(
-                        f"<div style='text-align: right; font-size: 13px; color: #10b981; margin-top: 8px; font-weight: bold;'>✅ {total_mins:02d}:{total_secs:02d}</div>",
+                        f"<div style='text-align: right; font-size: 13px; color: #10b981; margin-top: 8px; font-weight: bold;'>Total: {total_mins:02d}:{total_secs:02d}</div>",
                         unsafe_allow_html=True
                     )
 

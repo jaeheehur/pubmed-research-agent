@@ -269,90 +269,238 @@ def render_summary_card(results, unique_drugs, unique_aes, unique_demographics):
 
 
 def render_entities_tab(results):
-    """Render Entities tab content"""
+    """Render Entities tab content with PV-focused insights"""
     if not results.get('entities'):
         st.info("No entities extracted.")
         return
 
-    st.subheader("Entity Statistics")
+    st.subheader("📊 Pharmacovigilance Signal Analysis")
 
-    # Aggregate entities
+    # Aggregate data for PV analysis
+    drug_ae_matrix = {}  # Drug -> {AE: count}
+    ae_severity = {}  # AE -> {severity: count}
+    drug_demographics = {}  # Drug -> {gender/age: count}
     all_drugs = {}
     all_aes = {}
     all_genders = {}
-    all_races = {}
-    all_ages = {}
+    all_sample_sizes = []
 
     for entity_data in results['entities']:
         entities = entity_data['entities']
+        pmid = entity_data.get('pmid', '')
 
-        # Drugs
-        for drug in entities.get('drugs', []):
-            name = drug.get('name', '')
-            if name:
-                all_drugs[name] = all_drugs.get(name, 0) + 1
+        # Extract drugs
+        drugs_in_article = [d.get('name', '') for d in entities.get('drugs', []) if d.get('name')]
 
-        # Adverse events (now includes diseases)
-        for ae in entities.get('adverse_events', []):
-            event = ae.get('event', '')
-            if event:
-                all_aes[event] = all_aes.get(event, 0) + 1
+        # Extract adverse events with severity
+        aes_in_article = entities.get('adverse_events', [])
 
-        # Demographics
+        # Extract demographics
         demo = entities.get('demographics', {})
-        if demo:
-            gender = demo.get('gender', 'Unknown')
-            if gender and gender != 'Unknown':
-                all_genders[gender] = all_genders.get(gender, 0) + 1
+        gender = demo.get('gender', 'Unknown')
+        age = demo.get('age', 'Unknown')
+        sample_size = demo.get('sample_size', 0)
 
-            race = demo.get('race', demo.get('ethnicity', 'Unknown'))
-            if race and race != 'Unknown':
-                all_races[race] = all_races.get(race, 0) + 1
+        if sample_size and sample_size > 0:
+            all_sample_sizes.append(sample_size)
 
-            age = demo.get('age', 'Unknown')
-            if age and age != 'Unknown':
-                all_ages[age] = all_ages.get(age, 0) + 1
+        # Build drug-AE co-occurrence matrix
+        for drug in drugs_in_article:
+            if drug:
+                all_drugs[drug] = all_drugs.get(drug, 0) + 1
 
-    # Create visualizations
+                if drug not in drug_ae_matrix:
+                    drug_ae_matrix[drug] = {}
+                if drug not in drug_demographics:
+                    drug_demographics[drug] = {'gender': {}, 'age': {}}
+
+                # Associate AEs with this drug
+                for ae in aes_in_article:
+                    event = ae.get('event', '')
+                    severity = ae.get('severity', 'unknown')
+
+                    if event:
+                        all_aes[event] = all_aes.get(event, 0) + 1
+                        drug_ae_matrix[drug][event] = drug_ae_matrix[drug].get(event, 0) + 1
+
+                        # Track severity distribution
+                        if event not in ae_severity:
+                            ae_severity[event] = {}
+                        ae_severity[event][severity] = ae_severity[event].get(severity, 0) + 1
+
+                # Associate demographics with this drug
+                if gender and gender != 'Unknown':
+                    all_genders[gender] = all_genders.get(gender, 0) + 1
+                    drug_demographics[drug]['gender'][gender] = drug_demographics[drug]['gender'].get(gender, 0) + 1
+                if age and age != 'Unknown':
+                    drug_demographics[drug]['age'][age] = drug_demographics[drug]['age'].get(age, 0) + 1
+
+    # === 1. Drug-AE Safety Signal Heatmap ===
+    st.markdown("### 🔥 Drug-Adverse Event Co-occurrence Heatmap")
+    st.caption("Identify potential safety signals by examining which adverse events frequently co-occur with specific drugs")
+
+    if drug_ae_matrix:
+        # Get top drugs and AEs for heatmap
+        top_drugs = sorted(all_drugs.items(), key=lambda x: x[1], reverse=True)[:8]
+        top_aes = sorted(all_aes.items(), key=lambda x: x[1], reverse=True)[:15]
+
+        # Build heatmap data
+        heatmap_data = []
+        for drug, _ in top_drugs:
+            row = {'Drug': drug}
+            for ae, _ in top_aes:
+                row[ae] = drug_ae_matrix.get(drug, {}).get(ae, 0)
+            heatmap_data.append(row)
+
+        if heatmap_data:
+            heatmap_df = pd.DataFrame(heatmap_data)
+            heatmap_df = heatmap_df.set_index('Drug')
+
+            fig_heatmap = px.imshow(
+                heatmap_df,
+                labels=dict(x="Adverse Event", y="Drug", color="Co-occurrences"),
+                x=heatmap_df.columns,
+                y=heatmap_df.index,
+                color_continuous_scale='Reds',
+                aspect='auto'
+            )
+            fig_heatmap.update_layout(
+                height=400,
+                xaxis={'side': 'bottom'},
+                font=dict(size=10)
+            )
+            fig_heatmap.update_xaxes(tickangle=-45)
+            st.plotly_chart(fig_heatmap, use_container_width=True)
+    else:
+        st.info("Insufficient data for drug-AE co-occurrence analysis")
+
+    # === 2. Severity Distribution ===
     col1, col2 = st.columns(2)
 
     with col1:
-        st.markdown("### 💊 Top Drugs")
-        if all_drugs:
-            drug_df = pd.DataFrame(list(all_drugs.items()), columns=['Drug', 'Count']).sort_values(by='Count', ascending=False).head(10)
-            fig_bar = px.bar(drug_df, x='Count', y='Drug', orientation='h', title='Top 10 Drugs')
-            fig_bar.update_layout(yaxis={'categoryorder':'total ascending'})
-            st.plotly_chart(fig_bar, use_container_width=True)
+        st.markdown("### ⚠️ Adverse Event Severity Distribution")
+        st.caption("Prioritize safety review based on severity levels")
+
+        if ae_severity:
+            # Get top AEs by total count
+            top_aes_for_severity = sorted(all_aes.items(), key=lambda x: x[1], reverse=True)[:10]
+
+            severity_data = []
+            for ae, _ in top_aes_for_severity:
+                severities = ae_severity.get(ae, {})
+                for sev, count in severities.items():
+                    severity_data.append({
+                        'Adverse Event': ae,
+                        'Severity': sev.capitalize(),
+                        'Count': count
+                    })
+
+            if severity_data:
+                severity_df = pd.DataFrame(severity_data)
+                fig_severity = px.bar(
+                    severity_df,
+                    x='Count',
+                    y='Adverse Event',
+                    color='Severity',
+                    orientation='h',
+                    title='Top 10 AEs by Severity',
+                    color_discrete_map={
+                        'Severe': '#dc2626',
+                        'Moderate': '#f59e0b',
+                        'Mild': '#22c55e',
+                        'Unknown': '#9ca3af'
+                    }
+                )
+                fig_severity.update_layout(yaxis={'categoryorder':'total ascending'}, height=400)
+                st.plotly_chart(fig_severity, use_container_width=True)
         else:
-            st.info("No drugs extracted.")
+            st.info("No severity data available")
 
     with col2:
-        st.markdown("### ⚠️ Top Adverse Events")
-        if all_aes:
-            ae_df = pd.DataFrame(list(all_aes.items()), columns=['Adverse Event', 'Count']).sort_values(by='Count', ascending=False).head(10)
-            fig_bar = px.bar(ae_df, x='Count', y='Adverse Event', orientation='h', title='Top 10 Adverse Events')
-            fig_bar.update_layout(yaxis={'categoryorder':'total ascending'})
-            st.plotly_chart(fig_bar, use_container_width=True)
-        else:
-            st.info("No adverse events extracted.")
+        st.markdown("### 💊 Drug Mention Frequency")
+        st.caption("Most frequently studied drugs in selected articles")
 
-        st.markdown("### 👤 Demographics")
+        if all_drugs:
+            drug_df = pd.DataFrame(list(all_drugs.items()), columns=['Drug', 'Mentions']).sort_values(by='Mentions', ascending=False).head(10)
+            fig_drugs = px.bar(
+                drug_df,
+                x='Mentions',
+                y='Drug',
+                orientation='h',
+                title='Top 10 Drugs',
+                color='Mentions',
+                color_continuous_scale='Blues'
+            )
+            fig_drugs.update_layout(yaxis={'categoryorder':'total ascending'}, height=400, showlegend=False)
+            st.plotly_chart(fig_drugs, use_container_width=True)
+        else:
+            st.info("No drugs extracted")
+
+    # === 3. Demographics Analysis for Safety Monitoring ===
+    st.markdown("### 👥 Population Demographics in Safety Studies")
+    st.caption("Understand population characteristics for subgroup analysis")
+
+    col3, col4 = st.columns(2)
+
+    with col3:
         if all_genders:
             gender_df = pd.DataFrame(list(all_genders.items()), columns=['Gender', 'Count'])
-            fig_pie = px.pie(gender_df, values='Count', names='Gender', title='Gender Distribution')
-            st.plotly_chart(fig_pie, use_container_width=True)
+            fig_gender = px.pie(
+                gender_df,
+                values='Count',
+                names='Gender',
+                title='Gender Distribution Across Studies',
+                color_discrete_sequence=px.colors.qualitative.Set2
+            )
+            st.plotly_chart(fig_gender, use_container_width=True)
+        else:
+            st.info("No gender data available")
 
-        if all_ages:
-            age_df = pd.DataFrame(list(all_ages.items()), columns=['Age', 'Count']).sort_values(by='Count', ascending=False).head(10)
-            fig_bar = px.bar(age_df, x='Count', y='Age', orientation='h', title='Age Distribution')
-            fig_bar.update_layout(yaxis={'categoryorder':'total ascending'})
-            st.plotly_chart(fig_bar, use_container_width=True)
+    with col4:
+        if all_sample_sizes:
+            sample_df = pd.DataFrame({'Sample Size': all_sample_sizes})
+            fig_sample = px.histogram(
+                sample_df,
+                x='Sample Size',
+                nbins=20,
+                title='Study Sample Size Distribution',
+                labels={'Sample Size': 'Sample Size', 'count': 'Number of Studies'}
+            )
+            fig_sample.update_traces(marker_color='#60a5fa')
+            st.plotly_chart(fig_sample, use_container_width=True)
+        else:
+            st.info("No sample size data available")
 
-        if all_races:
-            race_df = pd.DataFrame(list(all_races.items()), columns=['Race/Ethnicity', 'Count']).sort_values(by='Count', ascending=False).head(10)
-            fig_bar = px.bar(race_df, x='Count', y='Race/Ethnicity', orientation='h', title='Race/Ethnicity Distribution')
-            fig_bar.update_layout(yaxis={'categoryorder':'total ascending'})
-            st.plotly_chart(fig_bar, use_container_width=True)
+    # === 4. Signal Detection Table ===
+    st.markdown("### 🎯 Potential Safety Signals (Drug-AE Pairs)")
+    st.caption("Drug-adverse event pairs that may require further investigation")
+
+    if drug_ae_matrix:
+        signal_data = []
+        for drug, aes in drug_ae_matrix.items():
+            for ae, count in aes.items():
+                severity = max(ae_severity.get(ae, {}).items(), key=lambda x: x[1])[0] if ae_severity.get(ae) else 'unknown'
+                signal_data.append({
+                    'Drug': drug,
+                    'Adverse Event': ae,
+                    'Co-occurrences': count,
+                    'Primary Severity': severity.capitalize()
+                })
+
+        signal_df = pd.DataFrame(signal_data).sort_values(by='Co-occurrences', ascending=False).head(20)
+
+        # Style the dataframe
+        def color_severity(val):
+            if val == 'Severe':
+                return 'background-color: #fee2e2; color: #991b1b'
+            elif val == 'Moderate':
+                return 'background-color: #fef3c7; color: #92400e'
+            elif val == 'Mild':
+                return 'background-color: #dcfce7; color: #166534'
+            return ''
+
+        styled_df = signal_df.style.applymap(color_severity, subset=['Primary Severity'])
+        st.dataframe(styled_df, use_container_width=True, height=400)
 
 
 def render_export_tab(results):
