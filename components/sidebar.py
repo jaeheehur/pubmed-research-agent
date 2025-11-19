@@ -138,7 +138,6 @@ def render_sidebar():
             '<div style="font-size: 0.85em; line-height: 2.2;">'
             '<span style="background-color: #90CAF9; padding: 2px 6px; border-radius: 3px;">💊 Drug</span><br>'
             '<span style="background-color: #EF9A9A; padding: 2px 6px; border-radius: 3px;">⚠️ Adverse Event</span><br>'
-            '<span style="background-color: #FFCC80; padding: 2px 6px; border-radius: 3px;">🏥 Disease</span><br>'
             '<span style="background-color: #CE93D8; padding: 2px 6px; border-radius: 3px;">👤 Demographics</span>'
             '</div>'
             '</div>',

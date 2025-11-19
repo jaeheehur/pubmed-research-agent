@@ -81,13 +81,15 @@ class GGUFEntityExtractor:
     "pregnancy": "pregnancy status if mentioned (e.g., pregnant, not pregnant, trimester, Unknown)",
     "bmi": "BMI or body mass index if mentioned (e.g., 25.3, overweight, Unknown)",
     "sample_size": 0
-  },
-  "diseases": ["disease1", "disease2", "disease3", "disease4", "..."]
+  }
 }
 
 Instructions:
 - Extract ALL drugs mentioned in the text
-- Extract ALL adverse events/side effects mentioned
+- Extract ALL adverse events, side effects, diseases, conditions, and medical outcomes mentioned
+  - Include both traditional adverse events (e.g., nausea, headache, rash) AND diseases/conditions (e.g., diabetes, hypertension, cancer)
+  - All medical conditions should be categorized as adverse events
+  - Examples: "type 2 diabetes", "cardiovascular disease", "acute headache", "nausea", "fatigue"
 - For demographics, carefully look for:
   - age: mean age, age range, median age (e.g., 65±10 years, 18-65 years)
   - gender: Male, Female, Both, or Unknown
@@ -95,7 +97,6 @@ Instructions:
   - pregnancy: pregnancy status if mentioned (e.g., "pregnant women", "first trimester", "not pregnant")
   - bmi: body mass index or weight status (e.g., "BMI 28.5", "obese", "overweight")
   - sample_size: n=X, X patients, X participants, X subjects
-- Extract ALL diseases/conditions mentioned (not limited to 2-3, can be many)
 - Return ONLY the JSON object, no explanations or other text"""
 
     def extract(self, text: str) -> ExtractedEntities:
@@ -123,11 +124,12 @@ JSON:"""
 
 INSTRUCTIONS:
 1. Extract ALL drug names, medications, vaccines, and treatments mentioned
-2. Extract ALL adverse events, side effects, and safety outcomes
+2. Extract ALL adverse events, side effects, diseases, conditions, and medical outcomes
+   - Include BOTH traditional adverse events (nausea, headache) AND diseases/conditions (diabetes, cancer)
+   - ALL medical conditions should be categorized as adverse events
+   - Examples: "type 2 diabetes", "hypertension", "nausea", "fatigue", "cardiovascular disease"
 3. Extract ALL patient demographics (age, gender, race/ethnicity, sample size)
-4. Extract ALL diseases, conditions, and diagnoses mentioned
-5. Distinguish between diseases being TREATED vs adverse events CAUSED by treatment
-6. Be thorough - extract every relevant entity, even if mentioned only once
+4. Be thorough - extract every relevant entity, even if mentioned only once
 
 Return your findings in this EXACT JSON structure:
 {{
@@ -135,7 +137,7 @@ Return your findings in this EXACT JSON structure:
     {{"name": "exact drug name from text", "context": "how it was used"}}
   ],
   "adverse_events": [
-    {{"event": "specific adverse event", "severity": "mild/moderate/severe/unknown", "context": "relevant details"}}
+    {{"event": "specific adverse event or condition", "severity": "mild/moderate/severe/unknown", "context": "relevant details"}}
   ],
   "demographics": {{
     "age": "age range or mean±SD",
@@ -144,8 +146,7 @@ Return your findings in this EXACT JSON structure:
     "pregnancy": "pregnancy status if mentioned",
     "bmi": "BMI information if available",
     "sample_size": number_of_participants
-  }},
-  "diseases": ["disease1", "disease2"]
+  }}
 }}
 
 ABSTRACT:
@@ -163,18 +164,19 @@ You are a medical entity extraction assistant specialized in extracting entities
 
 IMPORTANT INSTRUCTIONS:
 1. Extract ALL drug names, medications, vaccines, treatments, and therapeutic interventions (e.g., "acute headache treatments", "ibuprofen", "chemotherapy")
-2. Extract ALL adverse events, side effects, safety outcomes, and complications
+2. Extract ALL adverse events, side effects, diseases, conditions, and medical outcomes
+   - Include BOTH traditional adverse events (nausea, headache) AND diseases/conditions (diabetes, cancer, hypertension)
+   - ALL medical conditions should be categorized as adverse events
+   - Examples: "type 2 diabetes", "cardiovascular disease", "acute headache", "nausea", "fatigue"
 3. Extract ALL patient demographics: age, gender, race/ethnicity, pregnancy status, BMI, sample size
-4. Extract ALL diseases, medical conditions, disorders, and diagnoses mentioned
-5. Be comprehensive - extract EVERY relevant entity, even if mentioned only once
-6. Return ONLY a valid JSON object with NO additional text or explanations
+4. Be comprehensive - extract EVERY relevant entity, even if mentioned only once
+5. Return ONLY a valid JSON object with NO additional text or explanations
 
 Your response must be in this exact JSON format:
 {{
   "drugs": [{{"name": "drug/treatment name", "context": "how it was used"}}],
-  "adverse_events": [{{"event": "adverse event", "severity": "mild/moderate/severe/unknown", "context": "details"}}],
-  "demographics": {{"age": "age info", "gender": "Male/Female/Both/Unknown", "race": "race/ethnicity", "pregnancy": "pregnancy status", "bmi": "BMI info", "sample_size": number}},
-  "diseases": ["disease1", "disease2"]
+  "adverse_events": [{{"event": "adverse event or condition", "severity": "mild/moderate/severe/unknown", "context": "details"}}],
+  "demographics": {{"age": "age info", "gender": "Male/Female/Both/Unknown", "race": "race/ethnicity", "pregnancy": "pregnancy status", "bmi": "BMI info", "sample_size": number}}
 }}<|eot_id|><|start_header_id|>user<|end_header_id|>
 
 {user_message}<|eot_id|><|start_header_id|>assistant<|end_header_id|>

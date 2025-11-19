@@ -74,7 +74,7 @@ def _build_entity_count_table(article_entities, abstract):
         })
         row_num += 1
 
-    # Add adverse events
+    # Add adverse events (now includes diseases)
     for ae in article_entities.get('adverse_events', []):
         keyword = ae.get('event', 'Unknown')
         count = abstract_lower.count(keyword.lower()) if keyword != 'Unknown' else 1
@@ -82,17 +82,6 @@ def _build_entity_count_table(article_entities, abstract):
             "No.": row_num,
             "Keyword": keyword,
             "Entity Type": "Adverse Event",
-            "Count": count
-        })
-        row_num += 1
-
-    # Add diseases
-    for disease in article_entities.get('diseases', []):
-        count = abstract_lower.count(disease.lower()) if disease else 1
-        entity_rows.append({
-            "No.": row_num,
-            "Keyword": disease,
-            "Entity Type": "Disease",
             "Count": count
         })
         row_num += 1
@@ -252,7 +241,7 @@ def _extract_sample_size_patterns_for_table(sample_size, abstract, abstract_lowe
     return rows
 
 
-def render_summary_card(results, unique_drugs, unique_aes, unique_diseases, unique_demographics):
+def render_summary_card(results, unique_drugs, unique_aes, unique_demographics):
     """Render summary card with statistics"""
     st.markdown(f"""
     <div style="background: #f8f9fa; padding: 20px; border-radius: 10px; border: 1px solid #e9ecef; margin: 20px 0;">
@@ -269,10 +258,6 @@ def render_summary_card(results, unique_drugs, unique_aes, unique_diseases, uniq
             <div style="flex: 1; min-width: 140px; background: white; padding: 15px; border-radius: 8px; border-left: 4px solid #f87171; box-shadow: 0 1px 3px rgba(0,0,0,0.1);">
                 <div style="font-size: 13px; color: #6c757d; margin-bottom: 5px;">Adverse Events</div>
                 <div style="font-size: 28px; font-weight: bold; color: #212529;">{unique_aes}</div>
-            </div>
-            <div style="flex: 1; min-width: 140px; background: white; padding: 15px; border-radius: 8px; border-left: 4px solid #fbbf24; box-shadow: 0 1px 3px rgba(0,0,0,0.1);">
-                <div style="font-size: 13px; color: #6c757d; margin-bottom: 5px;">Diseases</div>
-                <div style="font-size: 28px; font-weight: bold; color: #212529;">{unique_diseases}</div>
             </div>
             <div style="flex: 1; min-width: 140px; background: white; padding: 15px; border-radius: 8px; border-left: 4px solid #c4b5fd; box-shadow: 0 1px 3px rgba(0,0,0,0.1);">
                 <div style="font-size: 13px; color: #6c757d; margin-bottom: 5px;">Demographics</div>
@@ -294,7 +279,6 @@ def render_entities_tab(results):
     # Aggregate entities
     all_drugs = {}
     all_aes = {}
-    all_diseases = {}
     all_genders = {}
     all_races = {}
     all_ages = {}
@@ -308,16 +292,11 @@ def render_entities_tab(results):
             if name:
                 all_drugs[name] = all_drugs.get(name, 0) + 1
 
-        # Adverse events
+        # Adverse events (now includes diseases)
         for ae in entities.get('adverse_events', []):
             event = ae.get('event', '')
             if event:
                 all_aes[event] = all_aes.get(event, 0) + 1
-
-        # Diseases
-        for disease in entities.get('diseases', []):
-            if disease:
-                all_diseases[disease] = all_diseases.get(disease, 0) + 1
 
         # Demographics
         demo = entities.get('demographics', {})
@@ -346,15 +325,6 @@ def render_entities_tab(results):
             st.plotly_chart(fig_bar, use_container_width=True)
         else:
             st.info("No drugs extracted.")
-
-        st.markdown("### 🏥 Top Diseases")
-        if all_diseases:
-            disease_df = pd.DataFrame(list(all_diseases.items()), columns=['Disease', 'Count']).sort_values(by='Count', ascending=False).head(10)
-            fig_bar = px.bar(disease_df, x='Count', y='Disease', orientation='h', title='Top 10 Diseases')
-            fig_bar.update_layout(yaxis={'categoryorder':'total ascending'})
-            st.plotly_chart(fig_bar, use_container_width=True)
-        else:
-            st.info("No diseases extracted.")
 
     with col2:
         st.markdown("### ⚠️ Top Adverse Events")
@@ -441,7 +411,6 @@ def _generate_csv_data(results):
         # Extract entity information
         drugs = ', '.join([d.get('name', '') for d in article_entities.get('drugs', [])]) if article_entities else ''
         adverse_events = ', '.join([ae.get('event', '') for ae in article_entities.get('adverse_events', [])]) if article_entities else ''
-        diseases = ', '.join(article_entities.get('diseases', [])) if article_entities else ''
 
         demo = article_entities.get('demographics', {}) if article_entities else {}
         age = demo.get('age', 'Unknown')
@@ -459,7 +428,6 @@ def _generate_csv_data(results):
             'Citations': article.get('referenced_by_count', 0),
             'Drugs': drugs,
             'Adverse Events': adverse_events,
-            'Diseases': diseases,
             'Age': age,
             'Gender': gender,
             'Race': race,

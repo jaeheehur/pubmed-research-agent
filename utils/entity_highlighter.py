@@ -11,7 +11,7 @@ def highlight_entities_in_text(text: str, entities: dict) -> str:
 
     Args:
         text: The abstract text
-        entities: Dictionary containing drugs, adverse_events, diseases
+        entities: Dictionary containing drugs, adverse_events, demographics
 
     Returns:
         HTML string with highlighted entities
@@ -23,7 +23,6 @@ def highlight_entities_in_text(text: str, entities: dict) -> str:
     colors = {
         'drug': '#90CAF9',  # Darker blue
         'adverse_event': '#EF9A9A',  # Darker red
-        'disease': '#FFCC80',  # Darker orange
         'demographics': '#CE93D8'  # Darker purple
     }
 
@@ -36,16 +35,11 @@ def highlight_entities_in_text(text: str, entities: dict) -> str:
         if name:
             entity_map.append({'text': name, 'type': 'drug', 'label': '💊 Drug'})
 
-    # Add adverse events
+    # Add adverse events (now includes diseases)
     for ae in entities.get('adverse_events', []):
         event = ae.get('event', '')
         if event:
-            entity_map.append({'text': event, 'type': 'adverse_event', 'label': '⚠️ AE'})
-
-    # Add diseases
-    for disease in entities.get('diseases', []):
-        if disease:
-            entity_map.append({'text': disease, 'type': 'disease', 'label': '🏥 Disease'})
+            entity_map.append({'text': event, 'type': 'adverse_event', 'label': '⚠️ Adverse Event'})
 
     # Add demographics
     entity_map.extend(_extract_demographics_entities(entities.get('demographics', {}), text))

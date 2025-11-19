@@ -221,13 +221,6 @@ if search_button:
                     if ae.get('event')
                 )) if results.get('entities') else 0
 
-                unique_diseases = len(set(
-                    disease
-                    for entity in results['entities']
-                    for disease in entity['entities'].get('diseases', [])
-                    if disease
-                )) if results.get('entities') else 0
-
                 unique_demographics = len(set(
                     f"{demo.get('age', '')}_{demo.get('gender', '')}_{demo.get('race', '')}"
                     for entity in results['entities']
@@ -237,7 +230,7 @@ if search_button:
 
                 # Render summary card in Articles tab
                 with summary_container:
-                    render_summary_card(results, unique_drugs, unique_aes, unique_diseases, unique_demographics)
+                    render_summary_card(results, unique_drugs, unique_aes, unique_demographics)
 
                 # Update Entities tab
                 entities_placeholder.empty()

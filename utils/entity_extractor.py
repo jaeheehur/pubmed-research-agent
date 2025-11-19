@@ -26,7 +26,6 @@ class ExtractedEntities:
     drugs: List[Dict[str, str]]  # [{name: str, context: str}]
     adverse_events: List[Dict[str, str]]  # [{event: str, severity: str, context: str}]
     demographics: Dict[str, Any]  # {age: str, gender: str, race: str, pregnancy: str, bmi: str, sample_size: int}
-    diseases: List[str]  # List of diseases/conditions mentioned
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary"""
@@ -102,13 +101,15 @@ class EntityExtractor:
     "pregnancy": "pregnancy status if mentioned (e.g., pregnant, not pregnant, trimester, Unknown)",
     "bmi": "BMI or body mass index if mentioned (e.g., 25.3, overweight, Unknown)",
     "sample_size": 0
-  },
-  "diseases": ["disease1", "disease2", "disease3", "disease4", "..."]
+  }
 }
 
 Instructions:
 - Extract ALL drugs mentioned in the text
-- Extract ALL adverse events/side effects mentioned
+- Extract ALL adverse events, side effects, diseases, conditions, and medical outcomes mentioned
+  - Include both traditional adverse events (e.g., nausea, headache, rash) AND diseases/conditions (e.g., diabetes, hypertension, cancer)
+  - All medical conditions should be categorized as adverse events
+  - Examples: "type 2 diabetes", "cardiovascular disease", "acute headache", "nausea", "fatigue"
 - For demographics, carefully look for:
   - age: mean age, age range, median age (e.g., 65±10 years, 18-65 years)
   - gender: Male, Female, Both, or Unknown
@@ -116,7 +117,6 @@ Instructions:
   - pregnancy: pregnancy status if mentioned (e.g., "pregnant women", "first trimester", "not pregnant")
   - bmi: body mass index or weight status (e.g., "BMI 28.5", "obese", "overweight")
   - sample_size: n=X, X patients, X participants, X subjects
-- Extract ALL diseases/conditions mentioned (not limited to 2-3, can be many)
 - Return ONLY the JSON object, no explanations or other text"""
 
     def extract(self, text: str, use_model: bool = True) -> ExtractedEntities:
@@ -219,7 +219,7 @@ Abstract:
                 entities_dict = self._parse_llm_response(generated_text)
 
                 # Check if parsing was successful
-                if entities_dict and (entities_dict.get('drugs') or entities_dict.get('adverse_events') or entities_dict.get('diseases')):
+                if entities_dict and (entities_dict.get('drugs') or entities_dict.get('adverse_events')):
                     logger.info(f"Successfully extracted entities with LLM: {len(entities_dict.get('drugs', []))} drugs, {len(entities_dict.get('adverse_events', []))} AEs")
                     return self._dict_to_entities(entities_dict)
                 else:
@@ -292,7 +292,6 @@ Abstract:
         # Simple keyword-based extraction
         drugs = []
         adverse_events = []
-        diseases = []
 
         # Extract demographics using config-based method
         demographics = self._extract_demographics(text)
@@ -315,13 +314,18 @@ Abstract:
                         "context": self._extract_context(text, match.start(), match.end())
                     })
 
-        # Common adverse events and symptoms
+        # Common adverse events, symptoms, and medical conditions (merged with diseases)
         ae_patterns = [
             (r'\b(headache|nausea|vomiting|dizziness|fatigue|pain|fever)\b', 'mild'),
             (r'\b(diarrhea|constipation|insomnia|rash|itching|dry mouth)\b', 'mild'),
             (r'\b(hypotension|hypertension|tachycardia|bradycardia|arrhythmia)\b', 'moderate'),
             (r'\b(myocardial infarction|stroke|seizure|anaphylaxis|death|mortality)\b', 'severe'),
             (r'\b(bleeding|hemorrhage|thrombosis|embolism|nephrotoxicity|hepatotoxicity)\b', 'severe'),
+            # Diseases/conditions (now categorized as adverse events)
+            (r'\b(diabetes|cancer|asthma|copd|heart failure|depression)\b', 'unknown'),
+            (r'\b(alzheimer|parkinson|multiple sclerosis|rheumatoid arthritis|osteoporosis)\b', 'unknown'),
+            (r'\b(migraine|epilepsy|schizophrenia|bipolar disorder|obesity|anemia)\b', 'unknown'),
+            (r'\b(pneumonia|tuberculosis|hiv|hepatitis|malaria|covid-19|coronavirus)\b', 'unknown'),
         ]
 
         for pattern, severity in ae_patterns:
@@ -335,26 +339,10 @@ Abstract:
                         "context": self._extract_context(text, match.start(), match.end())
                     })
 
-        # Common diseases
-        disease_patterns = [
-            r'\b(diabetes|hypertension|cancer|asthma|copd|heart failure|depression)\b',
-            r'\b(alzheimer|parkinson|multiple sclerosis|rheumatoid arthritis|osteoporosis)\b',
-            r'\b(migraine|epilepsy|schizophrenia|bipolar disorder|obesity|anemia)\b',
-            r'\b(pneumonia|tuberculosis|hiv|hepatitis|malaria|covid-19|coronavirus)\b'
-        ]
-
-        for pattern in disease_patterns:
-            matches = re.finditer(pattern, text_lower)
-            for match in matches:
-                disease_name = match.group(0).capitalize()
-                if disease_name not in diseases:
-                    diseases.append(disease_name)
-
         return ExtractedEntities(
             drugs=drugs,
             adverse_events=adverse_events,
-            demographics=demographics,
-            diseases=diseases
+            demographics=demographics
         )
 
     def _extract_context(self, text: str, start: int, end: int, window: int = 50) -> str:
@@ -527,8 +515,7 @@ Abstract:
                 "pregnancy": "Unknown",
                 "bmi": "Unknown",
                 "sample_size": 0
-            },
-            diseases=data.get('diseases', [])
+            }
         )
 
     def _empty_entities(self) -> ExtractedEntities:
@@ -543,8 +530,7 @@ Abstract:
                 "pregnancy": "Unknown",
                 "bmi": "Unknown",
                 "sample_size": 0
-            },
-            diseases=[]
+            }
         )
 
     def _empty_entities_dict(self) -> Dict[str, Any]:
