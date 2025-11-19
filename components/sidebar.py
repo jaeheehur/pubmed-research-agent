@@ -79,14 +79,15 @@ def render_sidebar():
                             n_gpu_layers=1,
                             pubmed_email=pubmed_email
                         )
-                        st.success(f"✅ {selected_model} loaded! ({model_config['size']})")
+                        # Use toast for temporary success message instead of st.success
+                        st.toast(f"✅ {selected_model} loaded! ({model_config['size']})", icon="✅")
                     else:
                         # Rule-based
                         st.session_state.agent = PubMedResearchAgentGGUF(
                             use_llm=False,
                             pubmed_email=pubmed_email
                         )
-                        st.success("✅ Rule-based extraction ready!")
+                        st.toast("✅ Rule-based extraction ready!", icon="✅")
                 except Exception as e:
                     st.error(f"❌ Failed to load model: {str(e)}")
                     st.error("Try selecting 'Rule-based (Fast)' or check the error logs")
